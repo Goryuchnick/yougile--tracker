@@ -1,14 +1,14 @@
 import requests
 import os
 from dotenv import load_dotenv
-from groq import Groq
+from google import genai
 
 load_dotenv()
 
 YOUGILE_BASE_URL = "https://yougile.com/api-v2"
 YOUGILE_API_KEY  = os.environ.get("YOUGILE_API_KEY", "")
-GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL       = "llama-3.3-70b-versatile"
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL     = "gemini-2.5-flash-lite"
 
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
 PRIORITY_STATES = {
@@ -22,6 +22,13 @@ TARGET_BOARD        = "Задачи лог"
 TARGET_COLUMN_NAMES = ["Надо сделать", "Бэклог", "Входящие"]
 
 
+def get_gemini_client() -> genai.Client:
+    if not GEMINI_API_KEY:
+        print("[FATAL] GEMINI_API_KEY не найден в переменных окружения.")
+        exit(1)
+    return genai.Client(api_key=GEMINI_API_KEY)
+
+
 def analyze_priority(title: str, description: str) -> str | None:
     prompt = (
         f"Ты — опытный менеджер проектов. Оцени важность задачи для команды маркетинга и цифровой трансформации.\n\n"
@@ -33,25 +40,23 @@ def analyze_priority(title: str, description: str) -> str | None:
         "Верни ТОЛЬКО одно слово: High, Medium или Low. Без пояснений."
     )
     try:
-        client = Groq(api_key=GROQ_API_KEY)
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=5,
-            temperature=0,
+        client = get_gemini_client()
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
         )
-        priority = response.choices[0].message.content.strip()
+        priority = response.text.strip()
         for p in ["High", "Medium", "Low"]:
             if p in priority:
                 return p
         return "Medium"
     except Exception as e:
-        print(f"Ошибка Groq: {e}")
+        print(f"Ошибка Gemini: {e}")
         return None
 
 
 def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> str:
-    report = ["--- Запуск AI Приоритизации (Groq / Llama 3.3) ---"]
+    report = ["--- Запуск AI Приоритизации (Gemini) ---"]
     headers = {
         "Authorization": f"Bearer {yougile_api_key}",
         "Content-Type": "application/json",

@@ -14,7 +14,6 @@ from telegram.ext import (
     MessageHandler, CallbackQueryHandler, filters,
 )
 from google import genai
-from groq import Groq
 import ai_prioritizer
 
 load_dotenv()
@@ -25,8 +24,7 @@ GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY")
 YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
 YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY")
 GEMINI_MODEL_AUDIO = "gemini-2.5-flash-lite"  # аудио — нативная поддержка длинных файлов
-GROQ_API_KEY       = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL_CHAT    = "llama-3.3-70b-versatile"  # чат, текст, извлечение задач — 128K ctx, ~30 RPM, 1000 RPD free
+GEMINI_MODEL_CHAT  = "gemini-2.5-flash-lite"  # чат, текст, извлечение задач
 
 # Стикеры приоритета
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
@@ -97,40 +95,32 @@ def esc(text) -> str:
     return html.escape(str(text))
 
 
-# --- Groq (чат + текст) ---
-def get_groq_client() -> Groq:
-    if not GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY не задан.")
-    return Groq(api_key=GROQ_API_KEY)
-
-
-def groq_generate(prompt: str, max_tokens: int = 4096) -> str:
-    """Одиночный запрос к Groq без истории — для извлечения задач из текста."""
-    client = get_groq_client()
-    response = client.chat.completions.create(
-        model=GROQ_MODEL_CHAT,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=0.3,
+# --- Gemini (чат + текст) ---
+def gemini_generate(prompt: str) -> str:
+    """Одиночный запрос к Gemini без истории — для извлечения задач из текста."""
+    client = get_gemini_client()
+    response = client.models.generate_content(
+        model=GEMINI_MODEL_CHAT,
+        contents=prompt,
     )
-    return response.choices[0].message.content.strip()
+    return response.text.strip()
 
 
-def groq_chat(user_id: int, user_text: str) -> str:
-    """Многоходовой чат с Васей. История хранится как OpenAI-формат."""
-    client = get_groq_client()
+def gemini_chat(user_id: int, user_text: str) -> str:
+    """Многоходовой чат с Васей через Gemini."""
+    client = get_gemini_client()
     history = chat_history.get(user_id, [])
-    # history: list of {"role": "user"/"assistant", "content": "..."}
-    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
-    response = client.chat.completions.create(
-        model=GROQ_MODEL_CHAT,
-        messages=messages,
-        max_tokens=1024,
-        temperature=0.8,
+    # Собираем промпт из истории
+    parts = [CHAT_SYSTEM_PROMPT + "\n\n"]
+    for msg in history:
+        role = "Пользователь" if msg["role"] == "user" else "Ассистент"
+        parts.append(f"{role}: {msg['content']}\n")
+    parts.append(f"Пользователь: {user_text}\nАссистент:")
+    response = client.models.generate_content(
+        model=GEMINI_MODEL_CHAT,
+        contents="".join(parts),
     )
-    reply = response.choices[0].message.content.strip()
+    reply = response.text.strip()
     history.append({"role": "user",      "content": user_text})
     history.append({"role": "assistant", "content": reply})
     chat_history[user_id] = history[-40:]
@@ -401,7 +391,7 @@ def _extraction_prompt(today: str) -> str:
 
 def extract_tasks_from_text(text: str) -> list[dict]:
     today = date.today().strftime("%Y-%m-%d")
-    raw = groq_generate(_extraction_prompt(today) + f"\n\nТранскрипт:\n{text}")
+    raw = gemini_generate(_extraction_prompt(today) + f"\n\nТранскрипт:\n{text}")
     return json.loads(_clean_json(raw))
 
 
@@ -445,7 +435,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def prioritize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🤖 Groq анализирует задачи...", reply_markup=MAIN_MENU)
+    msg = await update.message.reply_text("🤖 Gemini анализирует задачи...", reply_markup=MAIN_MENU)
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -742,7 +732,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     typing_msg = await update.message.reply_text("...")
     try:
         loop  = asyncio.get_event_loop()
-        reply = await loop.run_in_executor(None, groq_chat, update.effective_user.id, text)
+        reply = await loop.run_in_executor(None, gemini_chat, update.effective_user.id, text)
         await context.bot.edit_message_text(
             reply,
             chat_id=update.effective_chat.id,
