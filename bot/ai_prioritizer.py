@@ -1,129 +1,144 @@
 import requests
 import os
-import json
-import google.generativeai as genai
+from dotenv import load_dotenv
+from groq import Groq
 
-# Конфигурация
+load_dotenv()
+
 YOUGILE_BASE_URL = "https://yougile.com/api-v2"
-YOUGILE_API_KEY = os.environ.get("YOUGILE_API_KEY", "")
+YOUGILE_API_KEY  = os.environ.get("YOUGILE_API_KEY", "")
+GROQ_API_KEY     = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL       = "llama-3.3-70b-versatile"
 
-# Sticker IDs (from found_priority_sticker.json)
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
 PRIORITY_STATES = {
-    "High": "8ced62e1d595",   # Важно
-    "Medium": "55e6b0a1cb68", # Нормально
-    "Low": "414cda413f0a"     # Не важно
+    "High":   "8ced62e1d595",
+    "Medium": "55e6b0a1cb68",
+    "Low":    "414cda413f0a",
 }
 
+TARGET_PROJECT      = "Продуктивность"
+TARGET_BOARD        = "Задачи лог"
 TARGET_COLUMN_NAMES = ["Надо сделать", "Бэклог", "Входящие"]
 
-def get_gemini_model():
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("\n[!] GEMINI_API_KEY не найден в переменных окружения.")
-        api_key = input("Пожалуйста, введите ваш Gemini API Key: ").strip()
-        if not api_key:
-            print("API Key обязателен для работы скрипта.")
-            exit(1)
-    
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel('gemini-2.0-flash')
 
-def analyze_priority(model, title, description):
-    """
-    Анализирует задачу с помощью Gemini и возвращает Low, Medium или High.
-    """
-    prompt = f"""
-    Ты - опытный менеджер проектов. Оцени важность задачи для команды маркетинга и цифровой трансформации.
-    
-    Задача: {title}
-    Описание: {description}
-    
-    Критерии:
-    - High: Срочно, блокирует других, влияет на прибыль или критические процессы.
-    - Medium: Важно, но может подождать пару дней. Стандартная рабочая задача.
-    - Low: Идея "на потом", минорное улучшение, не срочно.
-    
-    Верни ТОЛЬКО одно слово: High, Medium или Low. Не добавляй никаких пояснений.
-    """
-    
+def analyze_priority(title: str, description: str) -> str | None:
+    prompt = (
+        f"Ты — опытный менеджер проектов. Оцени важность задачи для команды маркетинга и цифровой трансформации.\n\n"
+        f"Задача: {title}\nОписание: {description}\n\n"
+        "Критерии:\n"
+        "- High: Срочно, блокирует других, влияет на прибыль или критические процессы.\n"
+        "- Medium: Важно, но может подождать пару дней. Стандартная рабочая задача.\n"
+        "- Low: Идея «на потом», минорное улучшение, не срочно.\n\n"
+        "Верни ТОЛЬКО одно слово: High, Medium или Low. Без пояснений."
+    )
     try:
-        response = model.generate_content(prompt)
-        priority = response.text.strip()
-        
-        # Очистка от лишних символов
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=5,
+            temperature=0,
+        )
+        priority = response.choices[0].message.content.strip()
         for p in ["High", "Medium", "Low"]:
             if p in priority:
                 return p
-        return "Medium" # Fallback
+        return "Medium"
     except Exception as e:
-        print(f"Ошибка Gemini: {e}")
+        print(f"Ошибка Groq: {e}")
         return None
 
-def run_prioritization(yougile_api_key, gemini_model):
-    report = []
-    report.append("--- Запуск AI Приоритизации (Gemini) ---")
-    
+
+def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> str:
+    report = ["--- Запуск AI Приоритизации (Groq / Llama 3.3) ---"]
     headers = {
         "Authorization": f"Bearer {yougile_api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    
-    report.append("Сканирование проектов...")
+
+    report.append(f"Ищу проект «{TARGET_PROJECT}», доска «{TARGET_BOARD}»...")
     try:
-        projects_resp = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=headers, params={"limit": 50, "includeDeleted": "false"})
+        projects_resp = requests.get(
+            f"{YOUGILE_BASE_URL}/projects", headers=headers,
+            params={"limit": 50, "includeDeleted": "false"},
+        )
         if projects_resp.status_code != 200:
             return f"Ошибка получения проектов: {projects_resp.status_code}"
     except Exception as e:
         return f"Ошибка подключения к YouGile: {e}"
 
-    projects = projects_resp.json().get('content', [])
+    # Фильтруем только нужный проект
+    project_id = None
+    for p in projects_resp.json().get("content", []):
+        if p.get("title") == TARGET_PROJECT:
+            project_id = p["id"]
+            break
+    if not project_id:
+        return f"Проект «{TARGET_PROJECT}» не найден."
+
+    boards_resp = requests.get(
+        f"{YOUGILE_BASE_URL}/boards", headers=headers,
+        params={"projectId": project_id, "limit": 50},
+    )
+    if boards_resp.status_code != 200:
+        return f"Ошибка получения досок: {boards_resp.status_code}"
+
+    board_id = None
+    for b in boards_resp.json().get("content", []):
+        if b.get("title") == TARGET_BOARD:
+            board_id = b["id"]
+            break
+    if not board_id:
+        return f"Доска «{TARGET_BOARD}» не найдена в проекте «{TARGET_PROJECT}»."
+
+    columns_resp = requests.get(
+        f"{YOUGILE_BASE_URL}/columns", headers=headers,
+        params={"boardId": board_id, "limit": 50},
+    )
+    if columns_resp.status_code != 200:
+        return f"Ошибка получения колонок: {columns_resp.status_code}"
+
     updated_count = 0
-    
-    for project in projects:
-        boards_resp = requests.get(f"{YOUGILE_BASE_URL}/boards", headers=headers, params={"projectId": project['id'], "limit": 50})
-        if boards_resp.status_code != 200: continue
-        
-        for board in boards_resp.json().get('content', []):
-            columns_resp = requests.get(f"{YOUGILE_BASE_URL}/columns", headers=headers, params={"boardId": board['id'], "limit": 50})
-            if columns_resp.status_code != 200: continue
-            
-            for column in columns_resp.json().get('content', []):
-                if column['title'] in TARGET_COLUMN_NAMES:
-                    tasks_resp = requests.get(f"{YOUGILE_BASE_URL}/tasks", headers=headers, params={"columnId": column['id'], "limit": 50})
-                    if tasks_resp.status_code != 200: continue
-                    
-                    for task in tasks_resp.json().get('content', []):
-                        stickers = task.get('stickers', {})
-                        if stickers.get(STICKER_PRIORITY_ID):
-                            continue
-                            
-                        report.append(f"    [ANALYZE] {task['title']}")
-                        
-                        ai_priority = analyze_priority(gemini_model, task.get('title'), task.get('description', ''))
-                        
-                        if ai_priority and ai_priority in PRIORITY_STATES:
-                            state_id = PRIORITY_STATES[ai_priority]
-                            
-                            update_data = {"stickers": {STICKER_PRIORITY_ID: state_id}}
-                            update_url = f"{YOUGILE_BASE_URL}/tasks/{task['id']}"
-                            update_resp = requests.put(update_url, headers=headers, json=update_data)
-                            
-                            if update_resp.status_code == 200:
-                                report.append(f"      => Приоритет установлен: {ai_priority}")
-                                updated_count += 1
-                            else:
-                                report.append(f"      => Ошибка обновления: {update_resp.status_code}")
-                        else:
-                            report.append("      => Не удалось определить приоритет.")
-    
+    for column in columns_resp.json().get("content", []):
+        if column["title"] not in TARGET_COLUMN_NAMES:
+            continue
+        tasks_resp = requests.get(
+            f"{YOUGILE_BASE_URL}/task-list", headers=headers,
+            params={"columnId": column["id"], "limit": 50},
+        )
+        if tasks_resp.status_code != 200:
+            continue
+        for task in tasks_resp.json().get("content", []):
+            if task.get("stickers", {}).get(STICKER_PRIORITY_ID):
+                continue
+            report.append(f"    [ANALYZE] {task['title']}")
+            ai_priority = analyze_priority(
+                task.get("title"), task.get("description", "")
+            )
+            if ai_priority and ai_priority in PRIORITY_STATES:
+                state_id = PRIORITY_STATES[ai_priority]
+                update_resp = requests.put(
+                    f"{YOUGILE_BASE_URL}/tasks/{task['id']}",
+                    headers=headers,
+                    json={"stickers": {STICKER_PRIORITY_ID: state_id}},
+                )
+                if update_resp.status_code == 200:
+                    report.append(f"      => Приоритет: {ai_priority}")
+                    updated_count += 1
+                else:
+                    report.append(f"      => Ошибка: {update_resp.status_code}")
+            else:
+                report.append("      => Не удалось определить приоритет.")
+
     report.append(f"\nГотово! Обновлено задач: {updated_count}")
     return "\n".join(report)
 
+
 def main():
-    model = get_gemini_model()
-    result = run_prioritization(YOUGILE_API_KEY, model)
+    result = run_prioritization(YOUGILE_API_KEY)
     print(result)
+
 
 if __name__ == "__main__":
     main()

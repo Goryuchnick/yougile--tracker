@@ -7,3 +7,5 @@ data/document.json
 data/document (1).json
 *.log
 .claude/settings.local.json
+docker-compose.override.yml
+openai_key.txt

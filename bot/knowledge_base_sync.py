@@ -25,19 +25,7 @@ HOURS_BACK = 24
 def get_openai_client():
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        # Fallback to interactive input if not in env
-        # In automation, this should be in env. 
-        # For now, we assume user might provide it or it's set.
-        print("Warning: OPENAI_API_KEY not found in env.")
-        # Attempt to read from file if exists (common in this env)
-        try:
-            with open("openai_key.txt", "r") as f:
-                api_key = f.read().strip()
-        except FileNotFoundError:
-            pass
-            
-    if not api_key:
-        print("ERROR: AI capabilities require OPENAI_API_KEY.")
+        print("[WARN] OPENAI_API_KEY не найден. KB sync пропускает LLM-анализ.")
         return None
     return OpenAI(api_key=api_key)
 

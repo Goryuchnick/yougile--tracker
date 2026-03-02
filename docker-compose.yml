@@ -1,0 +1,34 @@
+services:
+  bot:
+    build: .
+    container_name: yougile-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Europe/Moscow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, signal; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  cron:
+    build: .
+    container_name: yougile-cron
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Europe/Moscow
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        echo "Cron container started"
+        while true; do
+          echo "[$(date)] Running ai_prioritizer..."
+          python bot/ai_prioritizer.py
+          echo "[$(date)] Running knowledge_base_sync..."
+          python bot/knowledge_base_sync.py
+          echo "[$(date)] Sleeping 24h..."
+          sleep 86400
+        done

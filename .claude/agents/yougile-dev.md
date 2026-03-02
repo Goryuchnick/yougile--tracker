@@ -9,7 +9,7 @@ model: sonnet
 
 ## Контекст проекта
 - YouGile API v2: `https://yougile.com/api-v2`, Bearer token авторизация
-- Gemini 2.0 Flash — основная AI-модель (бесплатный tier). После 01.06.2026 → `gemini-2.5-flash-lite`
+- Gemini: SDK `google-genai`, `from google import genai`, модель `gemini-2.5-flash-lite-preview-06-17`
 - Telegram Bot (python-telegram-bot >= 20.0)
 - Python 3.12
 
@@ -39,11 +39,15 @@ docs/            — Документация
 - Файлы: POST `/upload-file`
 - Вебхуки: POST `/webhooks` (event: `task-*`, `column-*` и т.д.)
 
-## Gemini API (бесплатный)
+## Gemini API (новый SDK)
 ```python
-import google.generativeai as genai
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-2.0-flash")
-response = model.generate_content(prompt)
+from google import genai
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+response = client.models.generate_content(model="gemini-2.5-flash-lite-preview-06-17", contents=prompt)
+response.text  # результат
+
+# С файлом (аудио/документ):
+uploaded = client.files.upload(file="path/to/file.mp3")
+response = client.models.generate_content(model=MODEL, contents=[uploaded, prompt])
 ```
 Лимиты бесплатного: 15 RPM, 1M TPM, 1500 RPD.

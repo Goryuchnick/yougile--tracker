@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.example
+*.log
+__pycache__
+*.pyc
+venv/
+.claude/
+docs/
+*.bat
+*.vbs
+*.md
+data/document.json
+data/document (1).json
+data/yougile_key.txt
+openai_key.txt

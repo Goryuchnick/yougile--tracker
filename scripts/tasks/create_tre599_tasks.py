@@ -9,7 +9,9 @@
 
 import requests
 import sys
+import os
 from datetime import datetime
+from dotenv import load_dotenv
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     try:
@@ -17,10 +19,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     except Exception:
         pass
 
-BASE_URL = "https://yougile.com/api-v2"
+load_dotenv()
 
-# Ключ: из файла или вставьте сюда
-import os
+BASE_URL = "https://yougile.com/api-v2"
 API_KEY = os.environ.get("YOUGILE_API_KEY", "")
 
 TARGET_COLUMN_NAME = "Надо сделать"

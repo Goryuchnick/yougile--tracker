@@ -1,38 +1,55 @@
-# YouGile Tracker — AI Automation Suite
+# YouGile AI Automation Suite
 
-## Проект
-Автоматизация YouGile: Telegram-бот, AI-приоритизация, еженедельные отчёты, транскрипты созвонов.
+## Project
+YouGile automation: Telegram bot, AI task prioritization, weekly reports, meeting transcripts → tasks.
 
-## Стек
-- Python 3.12, pip, venv
-- YouGile API v2: `https://yougile.com/api-v2` + Bearer token
-- Gemini 2.0 Flash (бесплатный tier) — транскрипция, саммаризация, задачи
-- Telegram Bot API (python-telegram-bot)
-- Деплой: Coolify на VPS (8GB RAM, 3 cores)
+## Stack
+- Python 3.12 + venv
+- YouGile API v2: `https://yougile.com/api-v2`, Bearer token auth
+- Gemini: `google-genai` SDK — `from google import genai` — models: `gemini-2.5-flash-lite` (chat/text), `gemini-2.5-flash` (audio)
+- python-telegram-bot >= 20.0 (async)
+- Deploy: Coolify on VPS (8GB RAM, 3 cores)
 
-## Структура
+## Structure
 ```
-bot/             — Telegram-бот, приоритизатор, KB-sync
-scripts/tasks/   — Скрипты создания задач
-scripts/setup/   — Настройка и обнаружение ресурсов API
-scripts/utils/   — Утилиты (отчёты, экспорт)
-data/            — JSON-данные, стикеры, структура
-docs/            — Документация и планы
+bot/             — Telegram bot, AI prioritizer
+scripts/tasks/   — Task creation scripts
+scripts/setup/   — API discovery/setup
+scripts/utils/   — Reports, export
+data/            — JSON data, stickers, API spec
+docs/            — Plans and feature docs
 ```
 
-## Команды
-- `pip install -r requirements.txt` — установка зависимостей
-- `python bot/yougile_bot.py` — запуск бота
-- `python scripts/utils/weekly_report.py` — еженедельный отчёт
+## Commands
+- `pip install -r requirements.txt`
+- `python bot/yougile_bot.py`
+- `python scripts/utils/weekly_report.py`
 
-## Правила
-- Секреты только через `.env` или `os.getenv()`, НИКОГДА в коде
-- Язык интерфейса и промптов: русский
-- Gemini — основная модель (бесплатная), OpenAI — только если Gemini не справляется
-- При работе с YouGile API использовать `/task-list` (не устаревший `/tasks`)
+## Rules
+- Secrets via `.env` / `os.getenv()` only — never hardcode
+- UI language and AI prompts: Russian
+- YouGile tasks: use `POST /task-list` (not deprecated `POST /tasks`)
+- Sync functions (requests, Gemini) → always wrap in `run_in_executor`
 
-## Навигация
-- Скиллы: @.claude/skills/ — `/weekly-report`, `/deploy`, `/transcript`, `/create-tasks`
-- Агенты: @.claude/agents/ — yougile-dev, deployer, api-explorer
-- План развития: @docs/meeting_transcript_feature.md
-- API-документация: @data/document (1).json (OpenAPI spec)
+## Agents & Skills — MANDATORY USE
+
+**Always use the appropriate agent or skill before writing code yourself.**
+
+| Task | Use |
+|------|-----|
+| Bot changes (handlers, commands, features) | Agent `tg-bot-dev` or skill `/bot-update` |
+| YouGile API, scripts, integrations | Agent `yougile-dev` |
+| API exploration, endpoint testing | Agent `api-explorer` |
+| Deploy, server, Coolify | Agent `deployer` |
+| Weekly report | Skill `/weekly-report` |
+| Meeting transcript processing | Skill `/transcript` |
+| Task creation scripts | Skill `/create-tasks` |
+| Deploy flow | Skill `/deploy` |
+
+Agents: `@.claude/agents/` — `tg-bot-dev`, `yougile-dev`, `deployer`, `api-explorer`
+Skills: `@.claude/skills/` — `/bot-update`, `/weekly-report`, `/deploy`, `/transcript`, `/create-tasks`
+
+## Key Files
+- Bot: `bot/yougile_bot.py` (all handlers), `bot/ai_prioritizer.py`
+- Feature plan: `docs/meeting_transcript_feature.md`
+- API spec: `data/document (1).json` (OpenAPI)

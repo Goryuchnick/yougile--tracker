@@ -9,9 +9,7 @@
 
 import requests
 import sys
-import os
 from datetime import datetime
-from dotenv import load_dotenv
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     try:
@@ -19,9 +17,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     except Exception:
         pass
 
-load_dotenv()
-
 BASE_URL = "https://yougile.com/api-v2"
+
+import os
 API_KEY = os.environ.get("YOUGILE_API_KEY", "")
 
 # Если известен UUID задачи TRE-599 — укажите сюда, иначе скрипт ищет по idTaskProject
@@ -176,7 +174,7 @@ def main():
         "Content-Type": "application/json",
     }
     print("Поиск родительской задачи TRE-599...")
-    parent_id, column_id, parent_title = find_parent_task(headers)
+    parent_id, _, parent_title = find_parent_task(headers)
     print(f"Найдена: {parent_title or PARENT_TASK_KEY} (id: {parent_id})")
     print(f"Колонка для подзадач: {column_id}\n")
 

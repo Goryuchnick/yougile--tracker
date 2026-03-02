@@ -8,6 +8,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bot/ bot/
 COPY scripts/ scripts/
 COPY data/structure.json data/found_priority_sticker.json data/found_alpina_sticker.json data/
-COPY docs/ docs/
+
+RUN useradd --create-home --no-log-init appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 CMD ["python", "bot/yougile_bot.py"]
