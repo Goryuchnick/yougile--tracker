@@ -25,14 +25,20 @@ YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 # Бесплатные модели OpenRouter (ротация при 429)
+# Быстрые/лёгкие модели — первыми, тяжёлые — последними
 FREE_MODELS_CHAT = [
-    "meta-llama/llama-3.3-70b-instruct:free",
+    "openrouter/optimus-alpha",
+    "nvidia/llama-3.1-nemotron-nano-8b-v1:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
-    "qwen/qwen3-235b-a22b:free",
     "google/gemma-3-27b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-235b-a22b:free",
     "nousresearch/hermes-3-llama-3.1-405b:free",
 ]
 FREE_MODELS_TASK = [
+    "openrouter/optimus-alpha",
+    "nvidia/llama-3.1-nemotron-nano-8b-v1:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "qwen/qwen3-235b-a22b:free",
     "deepseek/deepseek-r1:free",
