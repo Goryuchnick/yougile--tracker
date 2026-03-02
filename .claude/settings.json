@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(git *)",
+      "Bash(curl *yougile*)",
+      "Bash(docker *)",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(cat *)",
+      "Read",
+      "Skill(weekly-report)",
+      "Skill(deploy)",
+      "Skill(transcript)",
+      "Skill(create-tasks)",
+      "Agent(yougile-dev)",
+      "Agent(deployer)",
+      "Agent(api-explorer)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Read(.env)",
+      "Read(data/yougile_key.txt)"
+    ]
+  },
+  "language": "Русский"
+}

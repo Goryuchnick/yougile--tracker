@@ -1,0 +1,25 @@
+[
+    {
+        "id": "b0435d49-0237-47f7-88d6-c10de7adbc9d",
+        "name": "Приоритет",
+        "deleted": null,
+        "icon": "prio",
+        "states": [
+            {
+                "id": "8ced62e1d595",
+                "name": "Важно",
+                "color": "#D92400"
+            },
+            {
+                "id": "55e6b0a1cb68",
+                "name": "Нормально",
+                "color": "#8CC2FF"
+            },
+            {
+                "id": "414cda413f0a",
+                "name": "Не важно",
+                "color": ""
+            }
+        ]
+    }
+]

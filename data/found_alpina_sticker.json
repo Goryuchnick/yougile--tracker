@@ -1,0 +1,30 @@
+[
+    {
+        "id": "54176f3d-77ff-4eb9-a70c-70caa96910e3",
+        "name": "Направление",
+        "deleted": null,
+        "icon": "box",
+        "states": [
+            {
+                "id": "8d4f534aec91",
+                "name": "Альпина",
+                "color": "#2BDBCC"
+            },
+            {
+                "id": "2a1cba107dfd",
+                "name": "Welcome",
+                "color": "#79CE69"
+            },
+            {
+                "id": "413cd49fb4c4",
+                "name": "Личное",
+                "color": "#CA79DB"
+            },
+            {
+                "id": "00db86f5a160",
+                "name": "Агентство",
+                "color": "#2BDBCC"
+            }
+        ]
+    }
+]

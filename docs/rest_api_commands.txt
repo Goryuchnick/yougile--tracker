@@ -1,0 +1,54 @@
+API_URL: https://yougile.com/api-v2
+
+ШАГ 1: АВТОРИЗАЦИЯ
+Вы используете Яндекс.OAuth, поэтому получить ключ через код (логин/пароль) нельзя.
+Единственный способ:
+1. Зайти в браузере в YouGile.
+2. Перейти в "Настройки компании" -> "API".
+3. Скопировать "Ключ API".
+
+Вставьте этот ключ во все команды ниже вместо `ВАШ_КЛЮЧ`.
+
+---
+
+ШАГ 2: ПОЛУЧЕНИЕ ID КОЛОНКИ (REST ЗАПРОСЫ)
+
+1. Получить список проектов:
+GET /projects
+curl -X GET "https://yougile.com/api-v2/projects" -H "Authorization: Bearer ВАШ_КЛЮЧ" -H "Content-Type: application/json"
+
+(Из ответа скопируйте "id" нужного проекта)
+
+2. Получить доски в проекте:
+GET /boards?projectId=...
+curl -X GET "https://yougile.com/api-v2/boards?projectId=ID_ПРОЕКТА" -H "Authorization: Bearer ВАШ_КЛЮЧ" -H "Content-Type: application/json"
+
+(Из ответа скопируйте "id" нужной доски)
+
+3. Получить колонки на доске:
+GET /columns?boardId=...
+curl -X GET "https://yougile.com/api-v2/columns?boardId=ID_ДОСКИ" -H "Authorization: Bearer ВАШ_КЛЮЧ" -H "Content-Type: application/json"
+
+(Из ответа скопируйте "id" нужной колонки)
+
+---
+
+ШАГ 3: СОЗДАНИЕ ЗАДАЧИ (REST ЗАПРОС)
+
+POST /tasks
+Body: { "title": "Название задачи", "columnId": "ID_КОЛОНКИ" }
+
+Команда curl (для Windows PowerShell может потребоваться экранирование кавычек, пример ниже для Bash/GitBash):
+curl -X POST "https://yougile.com/api-v2/tasks" \
+     -H "Authorization: Bearer ВАШ_КЛЮЧ" \
+     -H "Content-Type: application/json" \
+     -d "{\"title\": \"Тестовая задача REST\", \"columnId\": \"ID_КОЛОНКИ\"}"
+
+---
+
+Пример для Windows PowerShell (Invoke-RestMethod):
+Invoke-RestMethod -Uri "https://yougile.com/api-v2/tasks" `
+  -Method Post `
+  -Headers @{ Authorization = "Bearer ВАШ_КЛЮЧ" } `
+  -ContentType "application/json" `
+  -Body '{"title": "Тестовая задача PowerShell", "columnId": "ID_КОЛОНКИ"}'
