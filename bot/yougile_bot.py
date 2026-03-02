@@ -24,27 +24,31 @@ YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
 YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# Бесплатные модели OpenRouter (ротация при 429)
-# Быстрые/лёгкие модели — первыми, тяжёлые — последними
-FREE_MODELS_CHAT = [
-    "openrouter/optimus-alpha",
-    "nvidia/llama-3.1-nemotron-nano-8b-v1:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "google/gemma-3-27b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen3-235b-a22b:free",
-    "nousresearch/hermes-3-llama-3.1-405b:free",
+# Модели OpenRouter — бесплатные первыми, платные как запас
+MODELS_CHAT = [
+    # Бесплатные
+    "stepfun/step-3.5-flash:free",             # быстрая
+    "nvidia/nemotron-3-nano-30b-a3b:free",     # 30B
+    "arcee-ai/trinity-large-preview:free",     # большая
+    "upstage/solar-pro-3:free",                # хороший русский
+    "liquid/lfm-2.5-1.2b-instruct:free",      # лёгкая
+    # Платные ($0.03-0.10/M токенов) — если все free заняты
+    "mistralai/mistral-small-creative",        # $0.10/M
+    "qwen/qwen3.5-flash-02-23",               # $0.10/M
+    "z-ai/glm-4.7-flash",                     # $0.06/M
 ]
-FREE_MODELS_TASK = [
-    "openrouter/optimus-alpha",
-    "nvidia/llama-3.1-nemotron-nano-8b-v1:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen3-235b-a22b:free",
-    "deepseek/deepseek-r1:free",
+MODELS_TASK = [
+    # Бесплатные
+    "stepfun/step-3.5-flash:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "arcee-ai/trinity-large-preview:free",
+    # Платные — запас
+    "mistralai/mistral-small-creative",
+    "qwen/qwen3.5-flash-02-23",
+    "z-ai/glm-4.7-flash",
 ]
-FREE_MODELS_AUDIO = [
-    "google/gemini-2.5-flash-preview:free",
+MODELS_AUDIO = [
+    "openai/gpt-audio-mini",                   # $0.60/M, поддержка аудио
 ]
 
 # Стикеры приоритета
@@ -157,7 +161,7 @@ def _openrouter_call(models: list, messages: list, max_tokens: int = 4096) -> st
 def gemini_generate(prompt: str) -> str:
     """Одиночный запрос для извлечения задач из текста."""
     return _openrouter_call(
-        FREE_MODELS_TASK,
+        MODELS_TASK,
         [{"role": "user", "content": prompt}],
     )
 
@@ -168,7 +172,7 @@ def gemini_chat(user_id: int, user_text: str) -> str:
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
-    reply = _openrouter_call(FREE_MODELS_CHAT, messages, max_tokens=1024)
+    reply = _openrouter_call(MODELS_CHAT, messages, max_tokens=1024)
     history.append({"role": "user",      "content": user_text})
     history.append({"role": "assistant", "content": reply})
     chat_history[user_id] = history[-40:]
@@ -190,7 +194,7 @@ def gemini_upload_and_generate(file_path: str, prompt: str) -> str:
             {"type": "text", "text": prompt},
         ],
     }]
-    return _openrouter_call(FREE_MODELS_AUDIO, messages)
+    return _openrouter_call(MODELS_AUDIO, messages)
 
 
 def _clean_json(raw: str) -> str:
