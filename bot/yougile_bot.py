@@ -13,19 +13,33 @@ from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
     MessageHandler, CallbackQueryHandler, filters,
 )
-from google import genai
+from openai import OpenAI
 import ai_prioritizer
 
 load_dotenv()
 
 # --- Конфигурация ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY")
 YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
 YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY")
-GEMINI_MODEL_AUDIO = "gemini-2.5-flash-lite"  # аудио — нативная поддержка длинных файлов
-GEMINI_MODEL_CHAT  = "gemini-2.5-flash"       # чат — отдельный лимит RPM от flash-lite
-GEMINI_MODEL_TASK  = "gemini-2.5-flash-lite"  # извлечение задач, приоритизация
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+
+# Бесплатные модели OpenRouter (ротация при 429)
+FREE_MODELS_CHAT = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "qwen/qwen3-235b-a22b:free",
+    "google/gemma-3-27b-it:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+]
+FREE_MODELS_TASK = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-235b-a22b:free",
+    "deepseek/deepseek-r1:free",
+]
+FREE_MODELS_AUDIO = [
+    "google/gemini-2.5-flash-preview:free",
+]
 
 # Стикеры приоритета
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
@@ -96,59 +110,81 @@ def esc(text) -> str:
     return html.escape(str(text))
 
 
-# --- Gemini (чат + текст) с retry при 429 ---
-def _gemini_with_retry(model: str, contents, max_retries: int = 3) -> str:
-    """Вызов Gemini с retry при 429 RESOURCE_EXHAUSTED."""
-    client = get_gemini_client()
-    for attempt in range(max_retries):
+# --- OpenRouter AI (чат + текст + аудио) с ротацией моделей ---
+def _get_openrouter_client() -> OpenAI:
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY не задан.")
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+
+
+def _openrouter_call(models: list, messages: list, max_tokens: int = 4096) -> str:
+    """Вызов OpenRouter с ротацией моделей при ошибках."""
+    client = _get_openrouter_client()
+    last_error = None
+    for model in models:
         try:
-            response = client.models.generate_content(model=model, contents=contents)
-            return response.text.strip()
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content.strip()
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait = 30 * (attempt + 1)
-                logging.warning(f"Gemini 429, retry {attempt+1}/{max_retries} через {wait}с")
-                time.sleep(wait)
+            last_error = e
+            err = str(e)
+            if "429" in err or "rate" in err.lower():
+                logging.warning(f"OpenRouter 429 на {model}, пробую следующую модель")
+                time.sleep(2)
+                continue
+            elif "402" in err:
+                logging.warning(f"OpenRouter 402 на {model}, пробую следующую модель")
+                continue
             else:
-                raise
-    raise Exception("Gemini: превышен лимит после всех попыток")
+                logging.error(f"OpenRouter ошибка на {model}: {e}")
+                continue
+    raise Exception(f"Все модели недоступны. Последняя ошибка: {last_error}")
 
 
 def gemini_generate(prompt: str) -> str:
-    """Одиночный запрос к Gemini — для извлечения задач из текста."""
-    return _gemini_with_retry(GEMINI_MODEL_TASK, prompt)
+    """Одиночный запрос для извлечения задач из текста."""
+    return _openrouter_call(
+        FREE_MODELS_TASK,
+        [{"role": "user", "content": prompt}],
+    )
 
 
 def gemini_chat(user_id: int, user_text: str) -> str:
-    """Многоходовой чат с Васей через Gemini."""
+    """Многоходовой чат с Васей через OpenRouter."""
     history = chat_history.get(user_id, [])
-    parts = [CHAT_SYSTEM_PROMPT + "\n\n"]
-    for msg in history:
-        role = "Пользователь" if msg["role"] == "user" else "Ассистент"
-        parts.append(f"{role}: {msg['content']}\n")
-    parts.append(f"Пользователь: {user_text}\nАссистент:")
-    reply = _gemini_with_retry(GEMINI_MODEL_CHAT, "".join(parts))
+    messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_text})
+    reply = _openrouter_call(FREE_MODELS_CHAT, messages, max_tokens=1024)
     history.append({"role": "user",      "content": user_text})
     history.append({"role": "assistant", "content": reply})
     chat_history[user_id] = history[-40:]
     return reply
 
 
-# --- Gemini (только аудио) ---
-def get_gemini_client() -> genai.Client:
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY не задан.")
-    return genai.Client(api_key=GEMINI_API_KEY)
-
-
 def gemini_upload_and_generate(file_path: str, prompt: str) -> str:
-    client = get_gemini_client()
-    uploaded = client.files.upload(file=file_path)
-    response = client.models.generate_content(
-        model=GEMINI_MODEL_AUDIO,
-        contents=[uploaded, prompt],
-    )
-    return response.text.strip()
+    """Аудио-транскрипция через OpenRouter (Gemini free preview)."""
+    import base64
+    with open(file_path, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode()
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    mime_map = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav", "ogg": "audio/ogg", "oga": "audio/ogg"}
+    mime = mime_map.get(ext, "audio/mpeg")
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": ext if ext in ("mp3", "wav") else "mp3"}},
+            {"type": "text", "text": prompt},
+        ],
+    }]
+    return _openrouter_call(FREE_MODELS_AUDIO, messages)
 
 
 def _clean_json(raw: str) -> str:

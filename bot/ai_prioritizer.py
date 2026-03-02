@@ -3,14 +3,20 @@ import os
 import time
 import logging
 from dotenv import load_dotenv
-from google import genai
+from openai import OpenAI
 
 load_dotenv()
 
-YOUGILE_BASE_URL = "https://yougile.com/api-v2"
-YOUGILE_API_KEY  = os.environ.get("YOUGILE_API_KEY", "")
-GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL     = "gemini-2.5-flash-lite"
+YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
+YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+FREE_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-235b-a22b:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "google/gemma-3-27b-it:free",
+]
 
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
 PRIORITY_STATES = {
@@ -24,11 +30,11 @@ TARGET_BOARD        = "Задачи лог"
 TARGET_COLUMN_NAMES = ["Надо сделать", "Бэклог", "Входящие"]
 
 
-def get_gemini_client() -> genai.Client:
-    if not GEMINI_API_KEY:
-        print("[FATAL] GEMINI_API_KEY не найден в переменных окружения.")
+def get_client() -> OpenAI:
+    if not OPENROUTER_API_KEY:
+        print("[FATAL] OPENROUTER_API_KEY не найден в переменных окружения.")
         exit(1)
-    return genai.Client(api_key=GEMINI_API_KEY)
+    return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 
 def analyze_priority(title: str, description: str) -> str | None:
@@ -41,32 +47,34 @@ def analyze_priority(title: str, description: str) -> str | None:
         "- Low: Идея «на потом», минорное улучшение, не срочно.\n\n"
         "Верни ТОЛЬКО одно слово: High, Medium или Low. Без пояснений."
     )
-    client = get_gemini_client()
-    for attempt in range(3):
+    client = get_client()
+    for model in FREE_MODELS:
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=5,
+                temperature=0,
             )
-            priority = response.text.strip()
+            priority = response.choices[0].message.content.strip()
             for p in ["High", "Medium", "Low"]:
                 if p in priority:
                     return p
             return "Medium"
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                wait = 30 * (attempt + 1)
-                logging.warning(f"Gemini 429, retry {attempt+1}/3 через {wait}с")
-                time.sleep(wait)
+            if "429" in str(e):
+                logging.warning(f"429 на {model}, пробую следующую")
+                time.sleep(2)
+                continue
             else:
-                print(f"Ошибка Gemini: {e}")
-                return None
-    print("Gemini: лимит исчерпан после всех попыток")
+                print(f"Ошибка {model}: {e}")
+                continue
+    print("Все модели недоступны")
     return None
 
 
 def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> str:
-    report = ["--- Запуск AI Приоритизации (Gemini) ---"]
+    report = ["--- Запуск AI Приоритизации (OpenRouter) ---"]
     headers = {
         "Authorization": f"Bearer {yougile_api_key}",
         "Content-Type": "application/json",
@@ -83,7 +91,6 @@ def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> 
     except Exception as e:
         return f"Ошибка подключения к YouGile: {e}"
 
-    # Фильтруем только нужный проект
     project_id = None
     for p in projects_resp.json().get("content", []):
         if p.get("title") == TARGET_PROJECT:
@@ -128,7 +135,7 @@ def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> 
             if task.get("stickers", {}).get(STICKER_PRIORITY_ID):
                 continue
             report.append(f"    [ANALYZE] {task['title']}")
-            time.sleep(5)  # пауза между запросами к Gemini (лимит RPM)
+            time.sleep(5)
             ai_priority = analyze_priority(
                 task.get("title"), task.get("description", "")
             )
