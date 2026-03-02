@@ -1,5 +1,7 @@
 import requests
 import os
+import time
+import logging
 from dotenv import load_dotenv
 from google import genai
 
@@ -39,20 +41,28 @@ def analyze_priority(title: str, description: str) -> str | None:
         "- Low: Идея «на потом», минорное улучшение, не срочно.\n\n"
         "Верни ТОЛЬКО одно слово: High, Medium или Low. Без пояснений."
     )
-    try:
-        client = get_gemini_client()
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-        )
-        priority = response.text.strip()
-        for p in ["High", "Medium", "Low"]:
-            if p in priority:
-                return p
-        return "Medium"
-    except Exception as e:
-        print(f"Ошибка Gemini: {e}")
-        return None
+    client = get_gemini_client()
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+            )
+            priority = response.text.strip()
+            for p in ["High", "Medium", "Low"]:
+                if p in priority:
+                    return p
+            return "Medium"
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                wait = 30 * (attempt + 1)
+                logging.warning(f"Gemini 429, retry {attempt+1}/3 через {wait}с")
+                time.sleep(wait)
+            else:
+                print(f"Ошибка Gemini: {e}")
+                return None
+    print("Gemini: лимит исчерпан после всех попыток")
+    return None
 
 
 def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> str:
@@ -118,6 +128,7 @@ def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> 
             if task.get("stickers", {}).get(STICKER_PRIORITY_ID):
                 continue
             report.append(f"    [ANALYZE] {task['title']}")
+            time.sleep(5)  # пауза между запросами к Gemini (лимит RPM)
             ai_priority = analyze_priority(
                 task.get("title"), task.get("description", "")
             )

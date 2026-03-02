@@ -24,7 +24,8 @@ GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY")
 YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
 YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY")
 GEMINI_MODEL_AUDIO = "gemini-2.5-flash-lite"  # аудио — нативная поддержка длинных файлов
-GEMINI_MODEL_CHAT  = "gemini-2.5-flash-lite"  # чат, текст, извлечение задач
+GEMINI_MODEL_CHAT  = "gemini-2.5-flash"       # чат — отдельный лимит RPM от flash-lite
+GEMINI_MODEL_TASK  = "gemini-2.5-flash-lite"  # извлечение задач, приоритизация
 
 # Стикеры приоритета
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
@@ -95,32 +96,38 @@ def esc(text) -> str:
     return html.escape(str(text))
 
 
-# --- Gemini (чат + текст) ---
-def gemini_generate(prompt: str) -> str:
-    """Одиночный запрос к Gemini без истории — для извлечения задач из текста."""
+# --- Gemini (чат + текст) с retry при 429 ---
+def _gemini_with_retry(model: str, contents, max_retries: int = 3) -> str:
+    """Вызов Gemini с retry при 429 RESOURCE_EXHAUSTED."""
     client = get_gemini_client()
-    response = client.models.generate_content(
-        model=GEMINI_MODEL_CHAT,
-        contents=prompt,
-    )
-    return response.text.strip()
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(model=model, contents=contents)
+            return response.text.strip()
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                wait = 30 * (attempt + 1)
+                logging.warning(f"Gemini 429, retry {attempt+1}/{max_retries} через {wait}с")
+                time.sleep(wait)
+            else:
+                raise
+    raise Exception("Gemini: превышен лимит после всех попыток")
+
+
+def gemini_generate(prompt: str) -> str:
+    """Одиночный запрос к Gemini — для извлечения задач из текста."""
+    return _gemini_with_retry(GEMINI_MODEL_TASK, prompt)
 
 
 def gemini_chat(user_id: int, user_text: str) -> str:
     """Многоходовой чат с Васей через Gemini."""
-    client = get_gemini_client()
     history = chat_history.get(user_id, [])
-    # Собираем промпт из истории
     parts = [CHAT_SYSTEM_PROMPT + "\n\n"]
     for msg in history:
         role = "Пользователь" if msg["role"] == "user" else "Ассистент"
         parts.append(f"{role}: {msg['content']}\n")
     parts.append(f"Пользователь: {user_text}\nАссистент:")
-    response = client.models.generate_content(
-        model=GEMINI_MODEL_CHAT,
-        contents="".join(parts),
-    )
-    reply = response.text.strip()
+    reply = _gemini_with_retry(GEMINI_MODEL_CHAT, "".join(parts))
     history.append({"role": "user",      "content": user_text})
     history.append({"role": "assistant", "content": reply})
     chat_history[user_id] = history[-40:]
