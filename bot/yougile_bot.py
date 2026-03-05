@@ -26,25 +26,29 @@ YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 # Модели OpenRouter — протестированы 2026-03-05
-# Бесплатные первыми, дешёвые платные как запас
+# Чат: бесплатные (простые ответы, не критично)
 MODELS_CHAT = [
-    "arcee-ai/trinity-large-preview:free",     # 1.1s, бесплатная
-    "google/gemma-3-4b-it:free",               # 1.5s, бесплатная
-    "google/gemma-3n-e4b-it:free",             # 1.3s, бесплатная
-    "liquid/lfm-2.5-1.2b-instruct:free",      # 1.1s, бесплатная
+    "arcee-ai/trinity-large-preview:free",     # 1.1s
+    "google/gemma-3-4b-it:free",               # 1.5s
+    "google/gemma-3n-e4b-it:free",             # 1.3s
+    "liquid/lfm-2.5-1.2b-instruct:free",      # 1.1s
+    "mistralai/mistral-nemo",                  # 1.4s, $0.02/M — запас
+]
+# Задачи: умные модели (JSON, извлечение, приоритизация)
+MODELS_TASK = [
+    "qwen/qwen-turbo",                        # 0.8s, $0.03/M — быстрый, хороший JSON
     "mistralai/mistral-nemo",                  # 1.4s, $0.02/M
     "microsoft/phi-4",                         # 0.9s, $0.06/M
-    "liquid/lfm-2-24b-a2b",                   # 1.1s, $0.03/M
 ]
-MODELS_TASK = [
-    "arcee-ai/trinity-large-preview:free",
-    "google/gemma-3-4b-it:free",
-    "google/gemma-3n-e4b-it:free",
-    "mistralai/mistral-nemo",                  # $0.02/M
-    "microsoft/phi-4",                         # $0.06/M
+# Анализ/агрегация: большой контекст, сильная модель
+MODELS_SMART = [
+    "deepseek/deepseek-chat",                  # 2.5s, $0.32/M, 128K контекст
+    "qwen/qwen3.5-flash-02-23",               # 2.0s, $0.10/M
+    "qwen/qwen-turbo",                        # 0.8s, $0.03/M — запас
 ]
+# Аудио: транскрипция голоса/встреч
 MODELS_AUDIO = [
-    "google/gemini-2.0-flash-lite-001",        # $0.075/M, аудио+видео
+    "google/gemini-2.0-flash-lite-001",        # 1.1s, $0.075/M
 ]
 
 # Стикеры приоритета
@@ -193,13 +197,13 @@ def ai_audio(file_path: str, prompt: str) -> str:
 
 
 def ai_summarize(tasks_text: str, question: str) -> str:
-    """AI-саммари задач."""
+    """AI-саммари задач через умную модель (большой контекст)."""
     prompt = (
         f"{question}\n\n"
         f"Данные задач:\n{tasks_text}\n\n"
         "Ответь кратко, структурированно. Без markdown. На русском."
     )
-    return _ai_call(MODELS_CHAT, [{"role": "user", "content": prompt}], max_tokens=1000)
+    return _ai_call(MODELS_SMART, [{"role": "user", "content": prompt}], max_tokens=1000)
 
 
 def _clean_json(raw: str) -> str:
