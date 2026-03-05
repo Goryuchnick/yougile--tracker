@@ -40,12 +40,6 @@ MODELS_TASK = [
     "mistralai/mistral-nemo",                  # 1.4s, $0.02/M
     "microsoft/phi-4",                         # 0.9s, $0.06/M
 ]
-# Анализ/агрегация: большой контекст, сильная модель
-MODELS_SMART = [
-    "deepseek/deepseek-chat",                  # 2.5s, $0.32/M, 128K контекст
-    "qwen/qwen3.5-flash-02-23",               # 2.0s, $0.10/M
-    "qwen/qwen-turbo",                        # 0.8s, $0.03/M — запас
-]
 # Аудио: транскрипция голоса/встреч
 MODELS_AUDIO = [
     "google/gemini-2.0-flash-lite-001",        # 1.1s, $0.075/M
@@ -196,15 +190,6 @@ def ai_audio(file_path: str, prompt: str) -> str:
     return _ai_call(MODELS_AUDIO, messages)
 
 
-def ai_summarize(tasks_text: str, question: str) -> str:
-    """AI-саммари задач через умную модель (большой контекст)."""
-    prompt = (
-        f"{question}\n\n"
-        f"Данные задач:\n{tasks_text}\n\n"
-        "Ответь кратко, структурированно. Без markdown. На русском."
-    )
-    return _ai_call(MODELS_SMART, [{"role": "user", "content": prompt}], max_tokens=1000)
-
 
 def _clean_json(raw: str) -> str:
     if raw.startswith("```"):
@@ -256,15 +241,6 @@ def get_column_tasks(column_id: str, limit: int = 100) -> list[dict]:
     r = requests.get(f"{YOUGILE_BASE_URL}/task-list", headers=_headers(), params={"columnId": column_id, "limit": limit})
     return r.json().get("content", []) if r.status_code == 200 else []
 
-
-def get_task_detail(task_id: str) -> dict | None:
-    r = requests.get(f"{YOUGILE_BASE_URL}/tasks/{task_id}", headers=_headers())
-    return r.json() if r.status_code == 200 else None
-
-
-def get_task_comments(task_id: str, limit: int = 10) -> list[dict]:
-    r = requests.get(f"{YOUGILE_BASE_URL}/chats/{task_id}/messages", headers=_headers(), params={"limit": limit})
-    return r.json().get("content", []) if r.status_code == 200 else []
 
 
 def get_users() -> dict[str, str]:
@@ -419,48 +395,31 @@ def get_completed_report(days: int = 7) -> str:
     if not completed_tasks:
         return f"За последние {days} дн. нет завершённых задач."
 
-    # Собираем детали (подзадачи, комменты)
+    # Сортируем: новые сверху
+    completed_tasks.sort(key=lambda t: t.get("completedTimestamp") or t.get("timestamp", 0), reverse=True)
+
     lines = [f"📊 <b>Отчёт за {days} дн.</b> — {len(completed_tasks)} задач выполнено\n"]
 
-    for t in completed_tasks[:15]:
+    for t in completed_tasks[:20]:
         key = t.get("idTaskProject") or t.get("idTaskCommon") or ""
         key_str = f"<code>{esc(key)}</code> " if key else ""
         stickers = t.get("stickers") or {}
         priority = PRIORITY_MAP_INV.get(stickers.get(STICKER_PRIORITY_ID, ""), "")
         p_emoji = PRIORITY_EMOJI.get(priority, "⚪")
 
-        lines.append(f"✅ {p_emoji} {key_str}<b>{esc(t['title'][:60])}</b>")
+        # Дата завершения
+        ct = t.get("completedTimestamp") or t.get("timestamp", 0)
+        done_date = datetime.fromtimestamp(ct / 1000).strftime("%d.%m") if ct else ""
+        date_str = f" ({done_date})" if done_date else ""
 
-        # Подзадачи
-        detail = get_task_detail(t["id"])
-        if detail:
-            subtask_ids = detail.get("subtasks", [])
-            if subtask_ids:
-                sub_done = 0
-                sub_names = []
-                for sid in subtask_ids[:5]:
-                    sub = get_task_detail(sid)
-                    if sub:
-                        status = "✓" if sub.get("completed") else "○"
-                        sub_names.append(f"{status} {sub['title'][:40]}")
-                        if sub.get("completed"):
-                            sub_done += 1
-                lines.append(f"  📎 Подзадачи: {sub_done}/{len(subtask_ids)}")
-                for sn in sub_names:
-                    lines.append(f"    {sn}")
+        # Описание из task-list (без доп. API-запросов)
+        desc = (t.get("description") or "").replace("\n", " ").strip()[:80]
+        desc_str = f"\n  <i>{esc(desc)}</i>" if desc else ""
 
-        # Последний коммент
-        comments = get_task_comments(t["id"], limit=3)
-        if comments:
-            last = comments[-1]
-            text = last.get("text", "")[:80]
-            if text:
-                lines.append(f"  💬 {esc(text)}")
+        lines.append(f"✅ {p_emoji} {key_str}<b>{esc(t['title'][:60])}</b>{date_str}{desc_str}")
 
-        lines.append("")  # пустая строка между задачами
-
-    if len(completed_tasks) > 15:
-        lines.append(f"<i>...и ещё {len(completed_tasks) - 15} задач</i>")
+    if len(completed_tasks) > 20:
+        lines.append(f"\n<i>...и ещё {len(completed_tasks) - 20} задач</i>")
 
     return "\n".join(lines)
 
