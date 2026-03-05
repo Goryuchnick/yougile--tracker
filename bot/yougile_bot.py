@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 # --- Состояние ---
 pending_tasks: dict[int, list[dict]] = {}
 chat_history:  dict[int, list[dict]] = {}
-report_period: dict[int, str] = {}  # user_id -> выбранный период для отчёта
+task_draft:    dict[int, dict] = {}  # user_id -> {title, description, step, board_id, ...}
 
 # --- Меню ---
 BTN_ACTIVE    = "📋 Активные задачи"
@@ -229,12 +229,33 @@ def _find_project_board() -> tuple[str | None, str | None]:
     return _project_id, _board_id
 
 
+def get_projects() -> list[dict]:
+    """Все проекты (не удалённые)."""
+    r = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=_headers(), params={"limit": 50})
+    if r.status_code != 200:
+        return []
+    return [p for p in r.json().get("content", []) if not p.get("deleted")]
+
+
+def get_boards(project_id: str) -> list[dict]:
+    """Доски проекта (не удалённые)."""
+    r = requests.get(f"{YOUGILE_BASE_URL}/boards", headers=_headers(), params={"projectId": project_id, "limit": 50})
+    if r.status_code != 200:
+        return []
+    return [b for b in r.json().get("content", []) if not b.get("deleted")]
+
+
+def get_columns_by_board(board_id: str) -> list[dict]:
+    """Колонки доски."""
+    r = requests.get(f"{YOUGILE_BASE_URL}/columns", headers=_headers(), params={"boardId": board_id, "limit": 50})
+    return r.json().get("content", []) if r.status_code == 200 else []
+
+
 def get_columns() -> list[dict]:
     _, board_id = _find_project_board()
     if not board_id:
         return []
-    r = requests.get(f"{YOUGILE_BASE_URL}/columns", headers=_headers(), params={"boardId": board_id, "limit": 50})
-    return r.json().get("content", []) if r.status_code == 200 else []
+    return get_columns_by_board(board_id)
 
 
 def get_column_tasks(column_id: str, limit: int = 100) -> list[dict]:
@@ -424,6 +445,90 @@ def get_completed_report(days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def get_event_report(report_type: str, days: int = 7) -> str:
+    """Отчёт по событиям из event_log (SQLite)."""
+    try:
+        from event_log import query_events, get_activity_summary
+    except ImportError:
+        return "Event log недоступен. Webhook-сервис не запущен."
+
+    type_map = {
+        "created": (["task-created"], "📝 Созданные задачи"),
+        "moved": (["task-moved"], "🔀 Перемещения задач"),
+        "comments": (["chat_message-created"], "💬 Комментарии"),
+        "activity": (["task-created", "task-updated", "task-moved", "task-deleted", "chat_message-created"], "📊 Вся активность"),
+    }
+    event_types, title = type_map.get(report_type, (None, "📊 Отчёт"))
+
+    since_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    events = query_events(event_types=event_types, since_ms=since_ms, limit=200)
+
+    if not events:
+        # Fallback — если event_log пуст (webhooks ещё не накопили данные)
+        if report_type == "created":
+            return _report_created_from_api(days)
+        return f"Нет событий за {days} дн. Лог событий начнёт заполняться после подключения webhooks."
+
+    lines = [f"{title} <b>за {days} дн.</b> — {len(events)} событий\n"]
+
+    event_labels = {
+        "task-created": "📝",
+        "task-updated": "✏️",
+        "task-moved": "🔀",
+        "task-deleted": "🗑",
+        "task-restored": "♻️",
+        "chat_message-created": "💬",
+    }
+
+    for ev in events[:30]:
+        ts = ev.get("timestamp", 0)
+        dt = datetime.fromtimestamp(ts / 1000).strftime("%d.%m %H:%M") if ts else ""
+        emoji = event_labels.get(ev["event_type"], "•")
+        data = json.loads(ev.get("data") or "{}") if isinstance(ev.get("data"), str) else ev.get("data", {})
+        title_text = data.get("title", ev.get("object_id", "")[:20])
+        lines.append(f"{emoji} {dt} <b>{esc(str(title_text)[:50])}</b>")
+
+    if len(events) > 30:
+        lines.append(f"\n<i>...и ещё {len(events) - 30}</i>")
+
+    return "\n".join(lines)
+
+
+def _report_created_from_api(days: int) -> str:
+    """Fallback: созданные задачи из API (по timestamp)."""
+    columns = get_columns()
+    if not columns:
+        return "Не удалось получить колонки."
+
+    cutoff_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    created = []
+
+    for col in columns:
+        tasks = get_column_tasks(col["id"], limit=200)
+        for t in tasks:
+            if t.get("timestamp", 0) >= cutoff_ts:
+                t["_column"] = col["title"]
+                created.append(t)
+
+    if not created:
+        return f"За последние {days} дн. нет новых задач."
+
+    created.sort(key=lambda t: t.get("timestamp", 0), reverse=True)
+    lines = [f"📝 <b>Созданные задачи за {days} дн.</b> — {len(created)} шт.\n"]
+
+    for t in created[:20]:
+        key = t.get("idTaskProject") or t.get("idTaskCommon") or ""
+        key_str = f"<code>{esc(key)}</code> " if key else ""
+        ts = t.get("timestamp", 0)
+        dt = datetime.fromtimestamp(ts / 1000).strftime("%d.%m") if ts else ""
+        lines.append(f"📝 {key_str}<b>{esc(t['title'][:60])}</b> ({dt}) → {esc(t.get('_column', ''))}")
+
+    if len(created) > 20:
+        lines.append(f"\n<i>...и ещё {len(created) - 20}</i>")
+
+    return "\n".join(lines)
+
+
 # --- Извлечение задач из текста ---
 def _extraction_prompt(today: str) -> str:
     return (
@@ -493,26 +598,58 @@ async def handle_active_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает выбор периода для отчёта."""
+    """Показывает выбор типа отчёта."""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Завершённые", callback_data="rtype_completed"),
+         InlineKeyboardButton("📝 Созданные", callback_data="rtype_created")],
+        [InlineKeyboardButton("🔀 Перемещения", callback_data="rtype_moved"),
+         InlineKeyboardButton("💬 Комментарии", callback_data="rtype_comments")],
+        [InlineKeyboardButton("📊 Вся активность", callback_data="rtype_activity")],
+    ])
+    await update.message.reply_text(
+        "Какой отчёт?", reply_markup=keyboard,
+    )
+
+
+async def handle_report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор типа отчёта → выбор периода."""
+    query = update.callback_query
+    await query.answer()
+    report_type = query.data.replace("rtype_", "")
+    context.user_data["report_type"] = report_type
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("3 дня", callback_data="report_3"),
          InlineKeyboardButton("7 дней", callback_data="report_7"),
          InlineKeyboardButton("14 дней", callback_data="report_14")],
         [InlineKeyboardButton("30 дней", callback_data="report_30")],
     ])
-    await update.message.reply_text(
-        "За какой период показать отчёт?", reply_markup=keyboard,
-    )
+    type_labels = {
+        "completed": "✅ Завершённые",
+        "created": "📝 Созданные",
+        "moved": "🔀 Перемещения",
+        "comments": "💬 Комментарии",
+        "activity": "📊 Вся активность",
+    }
+    label = type_labels.get(report_type, report_type)
+    await query.edit_message_text(f"{label}\nЗа какой период?", reply_markup=keyboard)
 
 
 async def handle_report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     days = int(query.data.replace("report_", ""))
+    report_type = context.user_data.pop("report_type", "completed")
+
     await query.edit_message_text(f"Собираю отчёт за {days} дн....")
     try:
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, get_completed_report, days)
+        if report_type == "completed":
+            text = await loop.run_in_executor(None, get_completed_report, days)
+        elif report_type in ("created", "moved", "comments", "activity"):
+            text = await loop.run_in_executor(None, get_event_report, report_type, days)
+        else:
+            text = await loop.run_in_executor(None, get_completed_report, days)
         await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         await query.edit_message_text(f"Ошибка: {esc(e)}")
@@ -527,6 +664,137 @@ async def handle_add_task_prompt(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode="HTML", reply_markup=MAIN_MENU,
     )
     context.user_data["awaiting_task"] = True
+
+
+# --- Пошаговое создание задачи (inline-кнопки) ---
+
+async def _start_task_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, msg):
+    """Шаг 1: выбор доски (проект → доска)."""
+    user_id = update.effective_user.id
+    loop = asyncio.get_event_loop()
+    projects = await loop.run_in_executor(None, get_projects)
+    if not projects:
+        await context.bot.edit_message_text("Нет доступных проектов.", chat_id=update.effective_chat.id, message_id=msg.message_id)
+        return
+
+    # Собираем проекты и их доски
+    boards_list = []
+    for p in projects:
+        boards = await loop.run_in_executor(None, get_boards, p["id"])
+        for b in boards:
+            boards_list.append({"id": b["id"], "title": b["title"], "project": p["title"]})
+
+    if not boards_list:
+        await context.bot.edit_message_text("Нет досок.", chat_id=update.effective_chat.id, message_id=msg.message_id)
+        return
+
+    task_draft[user_id] = {"title": title, "step": "board", "msg_id": msg.message_id}
+
+    # Кнопки досок (группируем по проекту)
+    buttons = []
+    for b in boards_list:
+        label = f"{b['project']} / {b['title']}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"tboard_{b['id']}")])
+    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="tboard_cancel")])
+
+    await context.bot.edit_message_text(
+        f"<b>{esc(title[:60])}</b>\n\nВыбери доску:",
+        chat_id=update.effective_chat.id, message_id=msg.message_id,
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def handle_task_board_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 2: выбор дедлайна."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    draft = task_draft.get(user_id)
+    if not draft:
+        await query.edit_message_text("Сессия истекла. Начни заново.")
+        return
+
+    if query.data == "tboard_cancel":
+        task_draft.pop(user_id, None)
+        await query.edit_message_text("Отменено.")
+        return
+
+    board_id = query.data.replace("tboard_", "")
+    draft["board_id"] = board_id
+    draft["step"] = "deadline"
+
+    today = date.today()
+    buttons = [
+        [InlineKeyboardButton("Сегодня", callback_data="tdl_0"),
+         InlineKeyboardButton("Завтра", callback_data="tdl_1")],
+        [InlineKeyboardButton("Через 3 дня", callback_data="tdl_3"),
+         InlineKeyboardButton("Через неделю", callback_data="tdl_7")],
+        [InlineKeyboardButton("Без дедлайна", callback_data="tdl_none")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="tdl_cancel")],
+    ]
+
+    await query.edit_message_text(
+        f"<b>{esc(draft['title'][:60])}</b>\n\nДедлайн?",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def handle_task_deadline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 3: создание задачи."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    draft = task_draft.pop(user_id, None)
+    if not draft:
+        await query.edit_message_text("Сессия истекла. Начни заново.")
+        return
+
+    if query.data == "tdl_cancel":
+        await query.edit_message_text("Отменено.")
+        return
+
+    # Определяем дедлайн
+    deadline_str = None
+    deadline_label = "без дедлайна"
+    if query.data != "tdl_none":
+        days_offset = int(query.data.replace("tdl_", ""))
+        dl_date = date.today() + timedelta(days=days_offset)
+        deadline_str = dl_date.strftime("%Y-%m-%d")
+        deadline_label = dl_date.strftime("%d.%m.%Y")
+
+    await query.edit_message_text(f"Создаю задачу...")
+
+    # Находим первую колонку доски
+    loop = asyncio.get_event_loop()
+    columns = await loop.run_in_executor(None, get_columns_by_board, draft["board_id"])
+    target_cols = ["Входящие", "Надо сделать", "Бэклог"]
+    column_id = None
+    for col in columns:
+        if col.get("title") in target_cols:
+            column_id = col["id"]
+            break
+    if not column_id and columns:
+        column_id = columns[0]["id"]
+    if not column_id:
+        await query.edit_message_text("Колонка не найдена.")
+        return
+
+    task_data = {"title": draft["title"], "description": "", "priority": "Medium"}
+    if deadline_str:
+        task_data["deadline"] = deadline_str
+
+    ok, data = await loop.run_in_executor(None, create_yougile_task, task_data, column_id)
+    if ok:
+        tid = data.get("id", "")
+        key = data.get("idTaskProject") or data.get("key") or ""
+        key_str = f" <code>{esc(key)}</code>" if key else ""
+        dl_info = f"\n📅 {deadline_label}" if deadline_str else ""
+        await query.edit_message_text(
+            f"✅ Создана!{key_str}\n<b>{esc(draft['title'][:80])}</b>{dl_info}\n🔗 <a href=\"{task_url(tid)}\">Открыть</a>",
+            parse_mode="HTML", disable_web_page_preview=True,
+        )
+    else:
+        await query.edit_message_text(f"Ошибка: {esc(data)}")
 
 
 async def prioritize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -742,28 +1010,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если ожидаем задачу (после нажатия ➕) — обрабатываем как задачу
     if context.user_data.get("awaiting_task"):
         context.user_data.pop("awaiting_task", None)
-        # Короткий текст → простая задача, длинный → транскрипт
         if len(text) < 200:
-            msg = await update.message.reply_text("Создаю задачу...")
+            # Пошаговый flow: выбор доски → дедлайн → создание
+            msg = await update.message.reply_text("Загружаю доски...")
             try:
-                loop = asyncio.get_event_loop()
-                column_id = await loop.run_in_executor(None, find_column_id)
-                if not column_id:
-                    await context.bot.edit_message_text("Колонка не найдена.", chat_id=update.effective_chat.id, message_id=msg.message_id)
-                    return
-                ok, data = await loop.run_in_executor(None, create_yougile_task,
-                    {"title": text[:80], "description": "", "priority": "Medium"}, column_id)
-                if ok:
-                    tid = data.get("id", "")
-                    key = data.get("idTaskProject") or data.get("key") or ""
-                    key_str = f" <code>{esc(key)}</code>" if key else ""
-                    await context.bot.edit_message_text(
-                        f"✅ Создана!{key_str}\n<b>{esc(text[:80])}</b>\n🔗 <a href=\"{task_url(tid)}\">Открыть</a>",
-                        chat_id=update.effective_chat.id, message_id=msg.message_id,
-                        parse_mode="HTML", disable_web_page_preview=True,
-                    )
-                else:
-                    await context.bot.edit_message_text(f"Ошибка: {esc(data)}", chat_id=update.effective_chat.id, message_id=msg.message_id)
+                await _start_task_flow(update, context, text[:80], msg)
             except Exception as e:
                 await context.bot.edit_message_text(f"Ошибка: {esc(e)}", chat_id=update.effective_chat.id, message_id=msg.message_id)
         else:
@@ -810,9 +1061,14 @@ if __name__ == "__main__":
     ))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_txt_file))
 
-    # Callbacks
-    app.add_handler(CallbackQueryHandler(handle_confirmation, pattern="^meeting_"))
+    # Callbacks — пошаговое создание задачи
+    app.add_handler(CallbackQueryHandler(handle_task_board_callback, pattern="^tboard_"))
+    app.add_handler(CallbackQueryHandler(handle_task_deadline_callback, pattern="^tdl_"))
+    # Callbacks — отчёты
+    app.add_handler(CallbackQueryHandler(handle_report_type_callback, pattern="^rtype_"))
     app.add_handler(CallbackQueryHandler(handle_report_callback, pattern="^report_"))
+    # Callbacks — прочее
+    app.add_handler(CallbackQueryHandler(handle_confirmation, pattern="^meeting_"))
 
     # Текст — последним
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

@@ -6,12 +6,34 @@ services:
     env_file: .env
     environment:
       - TZ=Europe/Moscow
+    volumes:
+      - events-data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import os, signal; os.kill(1, 0)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  webhook:
+    build: .
+    container_name: yougile-webhook
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Europe/Moscow
+      - EVENT_LOG_DB=/app/data/events.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - events-data:/app/data
+    command: ["python", "-m", "uvicorn", "bot.event_log:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   cron:
     build: .
@@ -32,3 +54,6 @@ services:
           echo "[$(date)] Sleeping 24h..."
           sleep 86400
         done
+
+volumes:
+  events-data:
