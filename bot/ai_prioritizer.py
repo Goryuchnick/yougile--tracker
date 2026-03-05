@@ -11,15 +11,14 @@ YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
 YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Бесплатные первыми, платные как запас
-FREE_MODELS = [
-    "stepfun/step-3.5-flash:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
+# Протестированные модели 2026-03-05
+MODELS = [
     "arcee-ai/trinity-large-preview:free",
-    # Платные — если все free заняты
+    "google/gemma-3-27b-it:free",
+    "google/gemma-3-12b-it:free",
     "mistralai/mistral-small-creative",
-    "qwen/qwen3.5-flash-02-23",
-    "z-ai/glm-4.7-flash",
+    "xiaomi/mimo-v2-flash",
+    "liquid/lfm-2-24b-a2b",
 ]
 
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
@@ -31,134 +30,113 @@ PRIORITY_STATES = {
 
 TARGET_PROJECT      = "Продуктивность"
 TARGET_BOARD        = "Задачи лог"
-TARGET_COLUMN_NAMES = ["Надо сделать", "Бэклог", "Входящие"]
+TARGET_COLUMN_NAMES = ["Надо сделать", "Бэклог", "Входящие", "В работе"]
 
 
 def get_client() -> OpenAI:
     if not OPENROUTER_API_KEY:
-        print("[FATAL] OPENROUTER_API_KEY не найден в переменных окружения.")
+        print("[FATAL] OPENROUTER_API_KEY не задан.")
         exit(1)
     return OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 
 def analyze_priority(title: str, description: str) -> str | None:
     prompt = (
-        f"Ты — опытный менеджер проектов. Оцени важность задачи для команды маркетинга и цифровой трансформации.\n\n"
-        f"Задача: {title}\nОписание: {description}\n\n"
-        "Критерии:\n"
-        "- High: Срочно, блокирует других, влияет на прибыль или критические процессы.\n"
-        "- Medium: Важно, но может подождать пару дней. Стандартная рабочая задача.\n"
-        "- Low: Идея «на потом», минорное улучшение, не срочно.\n\n"
-        "Верни ТОЛЬКО одно слово: High, Medium или Low. Без пояснений."
+        f"Оцени приоритет задачи. Ответь одним словом: High, Medium или Low.\n\n"
+        f"Задача: {title}\nОписание: {description[:300]}\n\n"
+        "High = срочно, блокирует других. Medium = стандартная. Low = не срочно."
     )
     client = get_client()
-    for model in FREE_MODELS:
+    for model in MODELS:
         try:
-            response = client.chat.completions.create(
+            resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=5,
                 temperature=0,
             )
-            priority = response.choices[0].message.content.strip()
+            content = resp.choices[0].message.content
+            if not content:
+                logging.warning(f"Пустой ответ от {model}")
+                continue
+            priority = content.strip()
             for p in ["High", "Medium", "Low"]:
                 if p in priority:
                     return p
             return "Medium"
         except Exception as e:
             if "429" in str(e):
-                logging.warning(f"429 на {model}, пробую следующую")
+                logging.warning(f"429 на {model}, следующая")
                 time.sleep(2)
-                continue
             else:
-                print(f"Ошибка {model}: {e}")
-                continue
-    print("Все модели недоступны")
+                logging.error(f"Ошибка {model}: {e}")
+            continue
+    logging.error("Все модели недоступны")
     return None
 
 
 def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> str:
-    report = ["--- Запуск AI Приоритизации (OpenRouter) ---"]
-    headers = {
-        "Authorization": f"Bearer {yougile_api_key}",
-        "Content-Type": "application/json",
-    }
+    report = ["--- AI Приоритизация ---"]
+    headers = {"Authorization": f"Bearer {yougile_api_key}", "Content-Type": "application/json"}
 
-    report.append(f"Ищу проект «{TARGET_PROJECT}», доска «{TARGET_BOARD}»...")
     try:
-        projects_resp = requests.get(
-            f"{YOUGILE_BASE_URL}/projects", headers=headers,
-            params={"limit": 50, "includeDeleted": "false"},
-        )
-        if projects_resp.status_code != 200:
-            return f"Ошибка получения проектов: {projects_resp.status_code}"
+        r = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=headers, params={"limit": 50})
+        if r.status_code != 200:
+            return f"Ошибка: {r.status_code}"
     except Exception as e:
-        return f"Ошибка подключения к YouGile: {e}"
+        return f"Ошибка подключения: {e}"
 
     project_id = None
-    for p in projects_resp.json().get("content", []):
+    for p in r.json().get("content", []):
         if p.get("title") == TARGET_PROJECT:
             project_id = p["id"]
             break
     if not project_id:
         return f"Проект «{TARGET_PROJECT}» не найден."
 
-    boards_resp = requests.get(
-        f"{YOUGILE_BASE_URL}/boards", headers=headers,
-        params={"projectId": project_id, "limit": 50},
-    )
-    if boards_resp.status_code != 200:
-        return f"Ошибка получения досок: {boards_resp.status_code}"
+    r = requests.get(f"{YOUGILE_BASE_URL}/boards", headers=headers, params={"projectId": project_id, "limit": 50})
+    if r.status_code != 200:
+        return f"Ошибка досок: {r.status_code}"
 
     board_id = None
-    for b in boards_resp.json().get("content", []):
+    for b in r.json().get("content", []):
         if b.get("title") == TARGET_BOARD:
             board_id = b["id"]
             break
     if not board_id:
-        return f"Доска «{TARGET_BOARD}» не найдена в проекте «{TARGET_PROJECT}»."
+        return f"Доска «{TARGET_BOARD}» не найдена."
 
-    columns_resp = requests.get(
-        f"{YOUGILE_BASE_URL}/columns", headers=headers,
-        params={"boardId": board_id, "limit": 50},
-    )
-    if columns_resp.status_code != 200:
-        return f"Ошибка получения колонок: {columns_resp.status_code}"
+    r = requests.get(f"{YOUGILE_BASE_URL}/columns", headers=headers, params={"boardId": board_id, "limit": 50})
+    if r.status_code != 200:
+        return f"Ошибка колонок: {r.status_code}"
 
-    updated_count = 0
-    for column in columns_resp.json().get("content", []):
-        if column["title"] not in TARGET_COLUMN_NAMES:
+    updated = 0
+    for col in r.json().get("content", []):
+        if col["title"] not in TARGET_COLUMN_NAMES:
             continue
-        tasks_resp = requests.get(
-            f"{YOUGILE_BASE_URL}/task-list", headers=headers,
-            params={"columnId": column["id"], "limit": 50},
-        )
-        if tasks_resp.status_code != 200:
+        tr = requests.get(f"{YOUGILE_BASE_URL}/task-list", headers=headers, params={"columnId": col["id"], "limit": 50})
+        if tr.status_code != 200:
             continue
-        for task in tasks_resp.json().get("content", []):
+        for task in tr.json().get("content", []):
             if task.get("stickers", {}).get(STICKER_PRIORITY_ID):
                 continue
-            report.append(f"    [ANALYZE] {task['title']}")
+            report.append(f"  [{task['title'][:50]}]")
             time.sleep(5)
-            ai_priority = analyze_priority(
-                task.get("title"), task.get("description", "")
-            )
-            if ai_priority and ai_priority in PRIORITY_STATES:
-                state_id = PRIORITY_STATES[ai_priority]
-                update_resp = requests.put(
-                    f"{YOUGILE_BASE_URL}/tasks/{task['id']}",
-                    headers=headers,
-                    json={"stickers": {STICKER_PRIORITY_ID: state_id}},
+            priority = analyze_priority(task.get("title"), task.get("description", ""))
+            if priority and priority in PRIORITY_STATES:
+                ur = requests.put(
+                    f"{YOUGILE_BASE_URL}/tasks/{task['id']}", headers=headers,
+                    json={"stickers": {STICKER_PRIORITY_ID: PRIORITY_STATES[priority]}},
                 )
-                if update_resp.status_code == 200:
-                    report.append(f"      => Приоритет: {ai_priority}")
-                    updated_count += 1
+                if ur.status_code == 200:
+                    report.append(f"    => {priority}")
+                    updated += 1
                 else:
-                    report.append(f"      => Ошибка: {update_resp.status_code}")
+                    report.append(f"    => Ошибка: {ur.status_code}")
             else:
-                report.append("      => Не удалось определить приоритет.")
+                report.append("    => Не определён")
 
-    report.append(f"\nГотово! Обновлено задач: {updated_count}")
+    report.append(f"\nОбновлено: {updated}")
     return "\n".join(report)
 
 
