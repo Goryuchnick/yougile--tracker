@@ -1,7 +1,6 @@
 services:
   bot:
     build: .
-    container_name: yougile-bot
     restart: unless-stopped
     env_file: .env
     environment:
@@ -17,19 +16,18 @@ services:
 
   webhook:
     build: .
-    container_name: yougile-webhook
     restart: unless-stopped
     env_file: .env
     environment:
       - TZ=Europe/Moscow
       - EVENT_LOG_DB=/app/data/events.db
     ports:
-      - "8000:8000"
+      - "8080:8080"
     volumes:
       - events-data:/app/data
-    command: ["python", "-m", "uvicorn", "bot.event_log:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["python", "-m", "uvicorn", "bot.event_log:app", "--host", "0.0.0.0", "--port", "8080"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -37,7 +35,6 @@ services:
 
   cron:
     build: .
-    container_name: yougile-cron
     restart: unless-stopped
     env_file: .env
     environment:
