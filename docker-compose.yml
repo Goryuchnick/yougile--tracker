@@ -26,6 +26,14 @@ services:
     volumes:
       - events-data:/app/data
     command: ["python", "-m", "uvicorn", "bot.event_log:app", "--host", "0.0.0.0", "--port", "8080"]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.yougile-webhook.rule=Host(`yougile-webhook.147.45.184.108.sslip.io`)"
+      - "traefik.http.routers.yougile-webhook.entrypoints=http"
+      - "traefik.http.services.yougile-webhook.loadbalancer.server.port=8080"
+    networks:
+      - coolify
+      - default
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 30s
@@ -54,3 +62,7 @@ services:
 
 volumes:
   events-data:
+
+networks:
+  coolify:
+    external: true
