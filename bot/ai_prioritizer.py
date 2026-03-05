@@ -14,11 +14,11 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 # Протестированные модели 2026-03-05
 MODELS = [
     "arcee-ai/trinity-large-preview:free",
-    "google/gemma-3-27b-it:free",
-    "google/gemma-3-12b-it:free",
-    "mistralai/mistral-small-creative",
-    "xiaomi/mimo-v2-flash",
-    "liquid/lfm-2-24b-a2b",
+    "google/gemma-3-4b-it:free",
+    "google/gemma-3n-e4b-it:free",
+    "mistralai/mistral-nemo",                  # $0.02/M
+    "microsoft/phi-4",                         # $0.06/M
+    "liquid/lfm-2-24b-a2b",                   # $0.03/M
 ]
 
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"

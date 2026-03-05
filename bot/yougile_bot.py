@@ -28,22 +28,23 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 # Модели OpenRouter — протестированы 2026-03-05
 # Бесплатные первыми, дешёвые платные как запас
 MODELS_CHAT = [
-    "arcee-ai/trinity-large-preview:free",     # 1.3s, бесплатная
-    "google/gemma-3-27b-it:free",              # 2.6s, бесплатная
-    "google/gemma-3-12b-it:free",              # 5.2s, бесплатная
-    "mistralai/mistral-small-creative",        # 0.5s, $0.10/M
-    "xiaomi/mimo-v2-flash",                    # 2.9s, $0.09/M
-    "liquid/lfm-2-24b-a2b",                   # 3.3s, $0.03/M
+    "arcee-ai/trinity-large-preview:free",     # 1.1s, бесплатная
+    "google/gemma-3-4b-it:free",               # 1.5s, бесплатная
+    "google/gemma-3n-e4b-it:free",             # 1.3s, бесплатная
+    "liquid/lfm-2.5-1.2b-instruct:free",      # 1.1s, бесплатная
+    "mistralai/mistral-nemo",                  # 1.4s, $0.02/M
+    "microsoft/phi-4",                         # 0.9s, $0.06/M
+    "liquid/lfm-2-24b-a2b",                   # 1.1s, $0.03/M
 ]
 MODELS_TASK = [
     "arcee-ai/trinity-large-preview:free",
-    "google/gemma-3-27b-it:free",
-    "mistralai/mistral-small-creative",
-    "xiaomi/mimo-v2-flash",
-    "liquid/lfm-2-24b-a2b",
+    "google/gemma-3-4b-it:free",
+    "google/gemma-3n-e4b-it:free",
+    "mistralai/mistral-nemo",                  # $0.02/M
+    "microsoft/phi-4",                         # $0.06/M
 ]
 MODELS_AUDIO = [
-    "openai/gpt-audio-mini",                   # $0.60/M, аудио-вход
+    "google/gemini-2.0-flash-lite-001",        # $0.075/M, аудио+видео
 ]
 
 # Стикеры приоритета
@@ -177,10 +178,14 @@ def ai_audio(file_path: str, prompt: str) -> str:
     with open(file_path, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode()
     ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    mime_map = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav",
+                "ogg": "audio/ogg", "oga": "audio/ogg", "flac": "audio/flac"}
+    mime = mime_map.get(ext, "audio/mpeg")
+    data_url = f"data:{mime};base64,{audio_b64}"
     messages = [{
         "role": "user",
         "content": [
-            {"type": "input_audio", "input_audio": {"data": audio_b64, "format": ext if ext in ("mp3", "wav") else "mp3"}},
+            {"type": "image_url", "image_url": {"url": data_url}},
             {"type": "text", "text": prompt},
         ],
     }]
