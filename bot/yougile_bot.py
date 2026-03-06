@@ -40,6 +40,12 @@ MODELS_TASK = [
     "mistralai/mistral-nemo",                  # 1.4s, $0.02/M
     "microsoft/phi-4",                         # 0.9s, $0.06/M
 ]
+# Анализ: саммари/рекомендации (не нужен JSON, можно бесплатные)
+MODELS_ANALYSIS = [
+    "arcee-ai/trinity-large-preview:free",     # 1.1s — бесплатная, хороший текст
+    "google/gemma-3-4b-it:free",               # 1.5s
+    "mistralai/mistral-nemo",                  # 1.4s, $0.02/M — запас
+]
 # Аудио: транскрипция голоса/встреч
 MODELS_AUDIO = [
     "google/gemini-2.0-flash-lite-001",        # 1.1s, $0.075/M
@@ -338,13 +344,14 @@ def create_yougile_task(task: dict, column_id: str) -> tuple[bool, dict | str]:
 
 
 # --- Функция 1: Активные задачи (требуют действий) ---
-def get_active_tasks() -> str:
-    """Собирает задачи из активных колонок."""
+def get_active_tasks_full() -> tuple[str, list[dict]]:
+    """Собирает задачи из активных колонок. Возвращает (HTML-текст, raw для AI)."""
     columns = get_columns()
     if not columns:
-        return "Не удалось получить колонки."
+        return "Не удалось получить колонки.", []
 
     result_parts = []
+    tasks_raw = []
     total = 0
     for col in columns:
         if col["title"] not in ACTIVE_COLUMNS:
@@ -355,14 +362,14 @@ def get_active_tasks() -> str:
             continue
         total += len(active)
         lines = [f"\n🗂 <b>{esc(col['title'])}</b> ({len(active)}):"]
-        for t in active[:10]:
+        for t in active:
             stickers = t.get("stickers") or {}
             priority = PRIORITY_MAP_INV.get(stickers.get(STICKER_PRIORITY_ID, ""), "")
             p_emoji = PRIORITY_EMOJI.get(priority, "⚪")
             key = t.get("idTaskProject") or t.get("idTaskCommon") or ""
             key_str = f"<code>{esc(key)}</code> " if key else ""
 
-            # Дедлайн
+            days_left = None
             dl_raw = t.get("deadline")
             dl_str = ""
             if isinstance(dl_raw, dict) and dl_raw.get("deadline"):
@@ -378,46 +385,30 @@ def get_active_tasks() -> str:
                 else:
                     dl_str = f" 📅 {dl_date.strftime('%d.%m')}"
 
-            lines.append(f"  {p_emoji} {key_str}<b>{esc(t['title'][:60])}</b>{dl_str}")
+            if len(lines) <= 10:
+                lines.append(f"  {p_emoji} {key_str}<b>{esc(t['title'][:60])}</b>{dl_str}")
+            tasks_raw.append({
+                "title": t.get("title", "")[:60],
+                "column": col["title"],
+                "priority": priority or "нет",
+                "days_to_deadline": days_left,
+            })
 
         if len(active) > 10:
             lines.append(f"  <i>...и ещё {len(active) - 10}</i>")
         result_parts.append("\n".join(lines))
 
     if not result_parts:
-        return "Нет активных задач. Всё чисто! 💪"
+        return "Нет активных задач. Всё чисто! 💪", []
 
     header = f"📋 <b>Активные задачи</b> — {total} шт.\n"
-    return header + "\n".join(result_parts)
+    return header + "\n".join(result_parts), tasks_raw
 
 
-def collect_active_tasks_raw() -> list[dict]:
-    """Собирает сырые данные активных задач для AI-анализа."""
-    columns = get_columns()
-    if not columns:
-        return []
-    result = []
-    for col in columns:
-        if col["title"] not in ACTIVE_COLUMNS:
-            continue
-        tasks = get_column_tasks(col["id"])
-        for t in tasks:
-            if t.get("completed") or t.get("archived"):
-                continue
-            stickers = t.get("stickers") or {}
-            priority = PRIORITY_MAP_INV.get(stickers.get(STICKER_PRIORITY_ID, ""), "")
-            days_left = None
-            dl_raw = t.get("deadline")
-            if isinstance(dl_raw, dict) and dl_raw.get("deadline"):
-                ts = dl_raw["deadline"] // 1000
-                days_left = (datetime.fromtimestamp(ts).date() - date.today()).days
-            result.append({
-                "title": t.get("title", "")[:60],
-                "column": col["title"],
-                "priority": priority or "нет",
-                "days_to_deadline": days_left,
-            })
-    return result
+def get_active_tasks() -> str:
+    """Обёртка для обратной совместимости."""
+    text, _ = get_active_tasks_full()
+    return text
 
 
 def ai_active_analysis(tasks_raw: list[dict]) -> str:
@@ -441,7 +432,7 @@ def ai_active_analysis(tasks_raw: list[dict]) -> str:
         f"До 400 символов. На русском. Без markdown."
     )
     try:
-        return _ai_call(MODELS_TASK, [{"role": "user", "content": prompt}], max_tokens=500)
+        return _ai_call(MODELS_ANALYSIS, [{"role": "user", "content": prompt}], max_tokens=500)
     except Exception as e:
         logger.warning(f"AI active analysis failed: {e}")
         return ""
@@ -607,7 +598,7 @@ def ai_report_summary(report_text: str, report_type: str, days: int) -> str:
         f"До 500 символов. На русском. Без markdown."
     )
     try:
-        return _ai_call(MODELS_TASK, [{"role": "user", "content": prompt}], max_tokens=600)
+        return _ai_call(MODELS_ANALYSIS, [{"role": "user", "content": prompt}], max_tokens=600)
     except Exception as e:
         logger.warning(f"AI report summary failed: {e}")
         return ""
@@ -705,7 +696,7 @@ def ai_workload_analysis(report_text: str, days: int) -> str:
         f"До 500 символов. На русском. Без markdown."
     )
     try:
-        return _ai_call(MODELS_TASK, [{"role": "user", "content": prompt}], max_tokens=600)
+        return _ai_call(MODELS_ANALYSIS, [{"role": "user", "content": prompt}], max_tokens=600)
     except Exception as e:
         logger.warning(f"AI workload analysis failed: {e}")
         return ""
@@ -768,13 +759,12 @@ async def handle_active_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = await update.message.reply_text("Загружаю задачи...", reply_markup=MAIN_MENU)
     try:
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, get_active_tasks)
+        text, tasks_raw = await loop.run_in_executor(None, get_active_tasks_full)
         await context.bot.edit_message_text(
             text, chat_id=update.effective_chat.id, message_id=msg.message_id,
             parse_mode="HTML", disable_web_page_preview=True,
         )
-        # AI-анализ вторым сообщением
-        tasks_raw = await loop.run_in_executor(None, collect_active_tasks_raw)
+        # AI-анализ вторым сообщением (без повторных API-запросов)
         if tasks_raw:
             ai_text = await loop.run_in_executor(None, ai_active_analysis, tasks_raw)
             if ai_text:
