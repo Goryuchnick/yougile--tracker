@@ -798,17 +798,109 @@ async def handle_task_deadline_callback(update: Update, context: ContextTypes.DE
 
 
 async def prioritize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("AI анализирует задачи...", reply_markup=MAIN_MENU)
+    """Меню анализа задач — готовые фильтры без AI."""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔥 Просроченные", callback_data="prio_overdue"),
+         InlineKeyboardButton("⏰ Горят (3 дня)", callback_data="prio_soon")],
+        [InlineKeyboardButton("❓ Без приоритета", callback_data="prio_noprio"),
+         InlineKeyboardButton("📋 Без дедлайна", callback_data="prio_nodl")],
+        [InlineKeyboardButton("🤖 AI расставить приоритеты", callback_data="prio_ai")],
+    ])
+    await update.message.reply_text(
+        "🎯 <b>Анализ задач</b>\nЧто показать?",
+        parse_mode="HTML", reply_markup=keyboard,
+    )
+
+
+def _get_filtered_tasks(filter_type: str) -> str:
+    """Фильтрация задач без AI — чисто по данным API."""
+    columns = get_columns()
+    if not columns:
+        return "Не удалось получить колонки."
+
+    today_ts = int(datetime.now().timestamp() * 1000)
+    today_date = date.today()
+    results = []
+
+    for col in columns:
+        if col["title"] not in ACTIVE_COLUMNS:
+            continue
+        tasks = get_column_tasks(col["id"])
+        for t in tasks:
+            if t.get("completed") or t.get("archived"):
+                continue
+
+            dl_raw = t.get("deadline")
+            dl_ts = dl_raw.get("deadline") if isinstance(dl_raw, dict) else None
+            has_deadline = dl_ts is not None
+            dl_date_obj = datetime.fromtimestamp(dl_ts / 1000).date() if dl_ts else None
+            days_left = (dl_date_obj - today_date).days if dl_date_obj else None
+
+            stickers = t.get("stickers") or {}
+            has_priority = bool(stickers.get(STICKER_PRIORITY_ID))
+
+            if filter_type == "overdue" and has_deadline and days_left is not None and days_left < 0:
+                results.append((t, col["title"], days_left))
+            elif filter_type == "soon" and has_deadline and days_left is not None and 0 <= days_left <= 3:
+                results.append((t, col["title"], days_left))
+            elif filter_type == "noprio" and not has_priority:
+                results.append((t, col["title"], days_left))
+            elif filter_type == "nodl" and not has_deadline:
+                results.append((t, col["title"], days_left))
+
+    if not results:
+        labels = {"overdue": "просроченных", "soon": "горящих", "noprio": "без приоритета", "nodl": "без дедлайна"}
+        return f"Нет {labels.get(filter_type, '')} задач. Всё в порядке!"
+
+    titles = {"overdue": "🔥 Просроченные", "soon": "⏰ Горят (≤3 дня)", "noprio": "❓ Без приоритета", "nodl": "📋 Без дедлайна"}
+    lines = [f"{titles.get(filter_type, '🎯')} — {len(results)} шт.\n"]
+
+    for t, col_title, days_left in results[:20]:
+        key = t.get("idTaskProject") or t.get("idTaskCommon") or ""
+        key_str = f"<code>{esc(key)}</code> " if key else ""
+        stickers = t.get("stickers") or {}
+        priority = PRIORITY_MAP_INV.get(stickers.get(STICKER_PRIORITY_ID, ""), "")
+        p_emoji = PRIORITY_EMOJI.get(priority, "⚪")
+
+        dl_str = ""
+        if days_left is not None:
+            if days_left < 0:
+                dl_str = f" 🔥 просрочен {abs(days_left)}д"
+            elif days_left == 0:
+                dl_str = " ⚡ сегодня"
+            elif days_left <= 3:
+                dl_str = f" ⏰ {days_left}д"
+
+        lines.append(f"{p_emoji} {key_str}<b>{esc(t['title'][:55])}</b>{dl_str}\n  → {esc(col_title)}")
+
+    if len(results) > 20:
+        lines.append(f"\n<i>...и ещё {len(results) - 20}</i>")
+
+    return "\n".join(lines)
+
+
+async def handle_prio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    filter_type = query.data.replace("prio_", "")
+
+    if filter_type == "ai":
+        await query.edit_message_text("🤖 AI расставляет приоритеты (до 10 задач)...")
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, ai_prioritizer.run_prioritization, YOUGILE_API_KEY)
+            await query.edit_message_text(esc(result))
+        except Exception as e:
+            await query.edit_message_text(f"Ошибка: {esc(e)}")
+        return
+
+    await query.edit_message_text("Анализирую...")
     try:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, ai_prioritizer.run_prioritization, YOUGILE_API_KEY)
-        await context.bot.edit_message_text(
-            esc(result), chat_id=update.effective_chat.id, message_id=msg.message_id,
-        )
+        text = await loop.run_in_executor(None, _get_filtered_tasks, filter_type)
+        await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
-        await context.bot.edit_message_text(
-            f"Ошибка: {esc(e)}", chat_id=update.effective_chat.id, message_id=msg.message_id,
-        )
+        await query.edit_message_text(f"Ошибка: {esc(e)}")
 
 
 async def chat_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1067,6 +1159,8 @@ if __name__ == "__main__":
     # Callbacks — отчёты
     app.add_handler(CallbackQueryHandler(handle_report_type_callback, pattern="^rtype_"))
     app.add_handler(CallbackQueryHandler(handle_report_callback, pattern="^report_"))
+    # Callbacks — анализ задач
+    app.add_handler(CallbackQueryHandler(handle_prio_callback, pattern="^prio_"))
     # Callbacks — прочее
     app.add_handler(CallbackQueryHandler(handle_confirmation, pattern="^meeting_"))
 
