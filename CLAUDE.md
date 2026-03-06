@@ -28,7 +28,7 @@ docs/            — Plans and feature docs
 ## Rules
 - Secrets via `.env` / `os.getenv()` only — never hardcode
 - UI language and AI prompts: Russian
-- YouGile tasks: use `POST /task-list` (not deprecated `POST /tasks`)
+- YouGile tasks: `GET /task-list` for listing, `POST /tasks` for creating (POST /task-list does NOT exist)
 - Sync functions (requests, Gemini) → always wrap in `run_in_executor`
 
 ## Agents & Skills — MANDATORY USE
@@ -49,7 +49,13 @@ docs/            — Plans and feature docs
 Agents: `@.claude/agents/` — `tg-bot-dev`, `yougile-dev`, `deployer`, `api-explorer`
 Skills: `@.claude/skills/` — `/bot-update`, `/weekly-report`, `/deploy`, `/transcript`, `/create-tasks`
 
+## AI Analysis Features
+- Reports: all report types get AI summary as a second message (`ai_report_summary`)
+- Active tasks: AI highlights overdue, near-deadline, stale tasks (`ai_active_analysis`)
+- Workload: created vs completed, backlog trend, per-assignee load (`get_workload_report` + `ai_workload_analysis`)
+
 ## Key Files
 - Bot: `bot/yougile_bot.py` (all handlers), `bot/ai_prioritizer.py`
+- Event log: `bot/event_log.py` (SQLite + FastAPI webhooks)
 - Feature plan: `docs/meeting_transcript_feature.md`
 - API spec: `data/document (1).json` (OpenAPI)

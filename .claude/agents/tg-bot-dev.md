@@ -49,6 +49,8 @@ response = client.models.generate_content(model=GEMINI_MODEL, contents=[uploaded
 | `handle_txt_file` | .txt файл | Текст транскрипта → задачи |
 | `handle_confirmation` | Inline-кнопки | ✅ Создать / ❌ Отмена |
 | `prioritize_command` | /prioritize | AI-приоритизация задач |
+| `handle_active_tasks` | 📋 кнопка | Список задач + AI-подсветка важных |
+| `handle_report_callback` | Выбор периода | Отчёт + AI-саммари (6 типов вкл. загрузку) |
 
 ## Шаблон нового хэндлера
 
