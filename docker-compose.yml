@@ -29,10 +29,10 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.yougile-webhook.rule=Host(`yougile-webhook.147.45.184.108.sslip.io`)"
-      - "traefik.http.routers.yougile-webhook.entrypoints=web"
+      - "traefik.http.routers.yougile-webhook.entrypoints=http"
       - "traefik.http.services.yougile-webhook.loadbalancer.server.port=8080"
       - "traefik.http.routers.yougile-webhook-secure.rule=Host(`yougile-webhook.147.45.184.108.sslip.io`)"
-      - "traefik.http.routers.yougile-webhook-secure.entrypoints=websecure"
+      - "traefik.http.routers.yougile-webhook-secure.entrypoints=https"
       - "traefik.http.routers.yougile-webhook-secure.tls=true"
       - "traefik.http.routers.yougile-webhook-secure.tls.certresolver=letsencrypt"
       - "traefik.http.routers.yougile-webhook-secure.service=yougile-webhook"
