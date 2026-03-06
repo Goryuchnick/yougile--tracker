@@ -9,7 +9,7 @@ import time
 import re
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler,
     MessageHandler, CallbackQueryHandler, filters,
@@ -86,22 +86,25 @@ pending_tasks: dict[int, list[dict]] = {}
 chat_history:  dict[int, list[dict]] = {}
 task_draft:    dict[int, dict] = {}  # user_id -> {title, description, step, board_id, ...}
 
+# Mini App URL
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://yougile-webhook.147.45.184.108.sslip.io/app")
+
 # --- Меню ---
 BTN_ACTIVE    = "📋 Активные задачи"
 BTN_ADD_TASK  = "➕ Новая задача"
 BTN_REPORT    = "📊 Отчёт"
 BTN_PRIORITIZE = "🎯 Приоритизация"
-BTN_RESET     = "🔄 Сброс"
+BTN_DASHBOARD = "📱 Дашборд"
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [[KeyboardButton(BTN_ACTIVE), KeyboardButton(BTN_ADD_TASK)],
      [KeyboardButton(BTN_REPORT), KeyboardButton(BTN_PRIORITIZE)],
-     [KeyboardButton(BTN_RESET)]],
+     [KeyboardButton(BTN_DASHBOARD, web_app=WebAppInfo(url=WEBAPP_URL))]],
     resize_keyboard=True,
     input_field_placeholder="Напиши задачу или выбери действие...",
 )
 
-MENU_BUTTONS = {BTN_ACTIVE, BTN_ADD_TASK, BTN_REPORT, BTN_PRIORITIZE, BTN_RESET}
+MENU_BUTTONS = {BTN_ACTIVE, BTN_ADD_TASK, BTN_REPORT, BTN_PRIORITIZE, BTN_DASHBOARD}
 
 # --- Системный промпт ---
 CHAT_SYSTEM_PROMPT = (
@@ -749,7 +752,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 Активные задачи — что требует внимания\n"
         "➕ Новая задача — текстом или голосом\n"
         "📊 Отчёт — что сделано за период\n"
-        "🎯 Приоритизация — AI расставит приоритеты\n\n"
+        "🎯 Приоритизация — AI расставит приоритеты\n"
+        "📱 Дашборд — визуальная сводка\n\n"
         "Также можешь просто написать — поможу разобраться.",
         parse_mode="HTML", reply_markup=MAIN_MENU,
     )
@@ -1289,10 +1293,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == BTN_PRIORITIZE:
         await prioritize_command(update, context)
         return
-    if text == BTN_RESET:
-        await chat_reset(update, context)
-        return
-
     if not text:
         return
 

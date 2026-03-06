@@ -54,8 +54,16 @@ Skills: `@.claude/skills/` — `/bot-update`, `/weekly-report`, `/deploy`, `/tra
 - Active tasks: AI highlights overdue, near-deadline, stale tasks (`ai_active_analysis`)
 - Workload: created vs completed, backlog trend, per-assignee load (`get_workload_report` + `ai_workload_analysis`)
 
+## Mini App (Telegram WebApp)
+- Dashboard: `bot/webapp/index.html` — visual task overview
+- API: `GET /api/dashboard` in `bot/event_log.py` — aggregated data
+- Static: served via FastAPI StaticFiles at `/app/`
+- URL: `https://yougile-webhook.147.45.184.108.sslip.io/app`
+- Opens via "Дашборд" button (WebAppInfo in ReplyKeyboard)
+
 ## Key Files
 - Bot: `bot/yougile_bot.py` (all handlers), `bot/ai_prioritizer.py`
-- Event log: `bot/event_log.py` (SQLite + FastAPI webhooks)
+- Event log + Mini App API: `bot/event_log.py` (SQLite + FastAPI + dashboard)
+- Mini App frontend: `bot/webapp/index.html`
 - Feature plan: `docs/meeting_transcript_feature.md`
 - API spec: `data/document (1).json` (OpenAPI)

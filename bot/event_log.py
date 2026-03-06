@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""FastAPI webhook receiver + SQLite event log для YouGile."""
+"""FastAPI webhook receiver + SQLite event log + Mini App для YouGile."""
 import json
 import logging
 import os
@@ -7,10 +7,13 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 
+import requests as http_requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
@@ -156,6 +159,152 @@ async def summary(days: int = 7):
 async def task_history(task_id: str):
     events = get_task_history(task_id)
     return {"task_id": task_id, "count": len(events), "events": events}
+
+
+# --- Dashboard API (для Mini App) ---
+YOUGILE_BASE_URL = "https://yougile.com/api-v2"
+YOUGILE_API_KEY = os.environ.get("YOUGILE_API_KEY", "")
+
+STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"
+PRIORITY_MAP = {"8ced62e1d595": "High", "55e6b0a1cb68": "Medium", "414cda413f0a": "Low"}
+ACTIVE_COLUMNS = ["Надо сделать", "В работе", "На согласовании"]
+
+
+def _yg_headers():
+    return {"Authorization": f"Bearer {YOUGILE_API_KEY}", "Content-Type": "application/json"}
+
+
+def _yg_get(path: str, params: dict = None) -> dict:
+    r = http_requests.get(f"{YOUGILE_BASE_URL}{path}", headers=_yg_headers(), params=params or {}, timeout=10)
+    return r.json() if r.status_code == 200 else {}
+
+
+def fetch_dashboard_data() -> dict:
+    """Собирает данные для дашборда Mini App."""
+    # Проекты → доски → колонки → задачи
+    projects = _yg_get("/projects", {"limit": 50}).get("content", [])
+    target_project = None
+    for p in projects:
+        if p.get("title") == "Продуктивность":
+            target_project = p
+            break
+    if not target_project:
+        return {"error": "Проект не найден"}
+
+    boards = _yg_get("/boards", {"projectId": target_project["id"], "limit": 50}).get("content", [])
+    target_board = None
+    for b in boards:
+        if b.get("title") == "Задачи лог":
+            target_board = b
+            break
+    if not target_board:
+        return {"error": "Доска не найдена"}
+
+    columns_data = _yg_get("/columns", {"boardId": target_board["id"], "limit": 50}).get("content", [])
+
+    columns = []
+    tasks = []
+    total_active = 0
+    priority_counts = {"High": 0, "Medium": 0, "Low": 0, "none": 0}
+    overdue = 0
+    due_soon = 0
+    assignee_counts = {}
+
+    # Пользователи
+    users_raw = _yg_get("/users", {"limit": 100}).get("content", [])
+    users_map = {}
+    for u in users_raw:
+        name = (u.get("realName") or u.get("name") or "").strip()
+        if name:
+            users_map[u["id"]] = name
+
+    for col in columns_data:
+        col_title = col.get("title", "")
+        is_active = col_title in ACTIVE_COLUMNS
+        col_tasks = _yg_get("/task-list", {"columnId": col["id"], "limit": 200}).get("content", [])
+        active_tasks = [t for t in col_tasks if not t.get("completed") and not t.get("archived")]
+        completed_tasks = [t for t in col_tasks if t.get("completed")]
+
+        columns.append({
+            "title": col_title,
+            "active": len(active_tasks),
+            "completed": len(completed_tasks),
+            "is_active": is_active,
+        })
+
+        if not is_active:
+            continue
+
+        total_active += len(active_tasks)
+        for t in active_tasks:
+            stickers = t.get("stickers") or {}
+            prio_state = stickers.get(STICKER_PRIORITY_ID, "")
+            priority = PRIORITY_MAP.get(prio_state, "")
+            priority_counts[priority or "none"] += 1
+
+            days_left = None
+            dl_raw = t.get("deadline")
+            if isinstance(dl_raw, dict) and dl_raw.get("deadline"):
+                ts = dl_raw["deadline"] // 1000
+                days_left = (datetime.fromtimestamp(ts).date() - datetime.now().date()).days
+                if days_left < 0:
+                    overdue += 1
+                elif days_left <= 3:
+                    due_soon += 1
+
+            for uid in (t.get("assigned") or []):
+                name = users_map.get(uid, uid[:8])
+                assignee_counts[name] = assignee_counts.get(name, 0) + 1
+
+            tasks.append({
+                "id": t.get("id", ""),
+                "title": t.get("title", "")[:80],
+                "column": col_title,
+                "priority": priority or "none",
+                "days_to_deadline": days_left,
+                "assignee": ", ".join(users_map.get(uid, "?") for uid in (t.get("assigned") or [])) or None,
+                "key": t.get("idTaskProject") or t.get("idTaskCommon") or "",
+            })
+
+    # Сортировка: просроченные сверху, потом по дедлайну
+    tasks.sort(key=lambda t: (
+        0 if t["days_to_deadline"] is not None and t["days_to_deadline"] < 0 else 1,
+        t["days_to_deadline"] if t["days_to_deadline"] is not None else 9999,
+    ))
+
+    # Событийная статистика за 7 дней
+    event_summary = get_activity_summary(7)
+
+    return {
+        "project": target_project.get("title", ""),
+        "board": target_board.get("title", ""),
+        "total_active": total_active,
+        "overdue": overdue,
+        "due_soon": due_soon,
+        "priority_counts": priority_counts,
+        "columns": columns,
+        "tasks": tasks[:50],
+        "assignees": [{"name": k, "count": v} for k, v in sorted(assignee_counts.items(), key=lambda x: -x[1])],
+        "events_7d": event_summary,
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/dashboard")
+async def dashboard_api(request: Request):
+    """JSON-данные для Mini App дашборда."""
+    try:
+        data = fetch_dashboard_data()
+        return JSONResponse(data)
+    except Exception as e:
+        logger.error(f"Dashboard error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# --- Статика Mini App ---
+WEBAPP_DIR = Path(__file__).parent / "webapp"
+if WEBAPP_DIR.exists():
+    app.mount("/app", StaticFiles(directory=str(WEBAPP_DIR), html=True), name="webapp")
 
 
 if __name__ == "__main__":
