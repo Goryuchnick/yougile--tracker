@@ -53,6 +53,7 @@ def analyze_priority(title: str, description: str) -> str | None:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=5,
                 temperature=0,
+                timeout=15,
             )
             content = resp.choices[0].message.content
             if not content:
@@ -66,7 +67,7 @@ def analyze_priority(title: str, description: str) -> str | None:
         except Exception as e:
             if "429" in str(e):
                 logging.warning(f"429 на {model}, следующая")
-                time.sleep(2)
+                time.sleep(1)
             else:
                 logging.error(f"Ошибка {model}: {e}")
             continue
@@ -110,6 +111,8 @@ def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> 
         return f"Ошибка колонок: {r.status_code}"
 
     updated = 0
+    MAX_TASKS = 10  # Лимит задач за один запуск
+    processed = 0
     for col in r.json().get("content", []):
         if col["title"] not in TARGET_COLUMN_NAMES:
             continue
@@ -119,8 +122,11 @@ def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> 
         for task in tr.json().get("content", []):
             if task.get("stickers", {}).get(STICKER_PRIORITY_ID):
                 continue
+            if processed >= MAX_TASKS:
+                report.append(f"\n⏸ Лимит {MAX_TASKS} задач. Остальные — в следующий раз.")
+                break
             report.append(f"  [{task['title'][:50]}]")
-            time.sleep(5)
+            time.sleep(1)
             priority = analyze_priority(task.get("title"), task.get("description", ""))
             if priority and priority in PRIORITY_STATES:
                 ur = requests.put(
@@ -134,6 +140,9 @@ def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> 
                     report.append(f"    => Ошибка: {ur.status_code}")
             else:
                 report.append("    => Не определён")
+            processed += 1
+        if processed >= MAX_TASKS:
+            break
 
     report.append(f"\nОбновлено: {updated}")
     return "\n".join(report)
