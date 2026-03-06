@@ -759,6 +759,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Открытие Mini App дашборда через inline-кнопку."""
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📱 Открыть дашборд", web_app=WebAppInfo(url=WEBAPP_URL)),
+    ]])
+    await update.message.reply_text(
+        "Нажми кнопку, чтобы открыть дашборд с задачами:",
+        reply_markup=keyboard,
+    )
+
+
 async def handle_active_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Загружаю задачи...", reply_markup=MAIN_MENU)
     try:
@@ -1337,6 +1348,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("tasks", handle_active_tasks))
     app.add_handler(CommandHandler("report", handle_report_menu))
     app.add_handler(CommandHandler("prioritize", prioritize_command))
+    app.add_handler(CommandHandler("dashboard", dashboard_command))
     app.add_handler(CommandHandler("reset", chat_reset))
 
     # Медиа
@@ -1363,6 +1375,26 @@ if __name__ == "__main__":
 
     # Текст — последним
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Настройка меню бота при запуске
+    async def post_init(application):
+        from telegram import BotCommand, MenuButtonWebApp
+        await application.bot.set_my_commands([
+            BotCommand("start", "Главное меню"),
+            BotCommand("tasks", "Активные задачи"),
+            BotCommand("report", "Отчёт"),
+            BotCommand("prioritize", "Приоритизация"),
+            BotCommand("dashboard", "Дашборд"),
+            BotCommand("reset", "Сброс чата"),
+        ])
+        try:
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="📱 Дашборд", web_app=WebAppInfo(url=WEBAPP_URL))
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось установить Menu Button: {e}")
+
+    app.post_init = post_init
 
     print("Пацанский бот запущен")
     app.run_polling()
