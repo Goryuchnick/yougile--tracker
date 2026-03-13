@@ -852,13 +852,13 @@ def format_tasks_preview(tasks: list[dict]) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я <b>Вася</b> — помощник по задачам YouGile.\n\n"
-        "📋 Активные задачи — что требует внимания\n"
-        "➕ Новая задача — текстом или голосом\n"
-        "📊 Отчёт — что сделано за период\n"
-        "🎯 Приоритизация — AI расставит приоритеты\n"
-        "📱 Дашборд — визуальная сводка\n\n"
-        "Также можешь просто написать — поможу разобраться.",
+        "Йо! Я <b>Вася</b> — твой пацан по задачам YouGile.\n\n"
+        "📋 Активные задачи — что горит\n"
+        "➕ Новая задача — закинуть дело\n"
+        "📊 Отчёт — чё сделали за период\n"
+        "🎯 Приоритизация — разложить по полочкам\n"
+        "📱 Дашборд — красивая сводка\n\n"
+        "Можешь просто написать — разберёмся.",
         parse_mode="HTML", reply_markup=MAIN_MENU,
     )
 
@@ -875,7 +875,7 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_active_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("Загружаю задачи...", reply_markup=MAIN_MENU)
+    msg = await update.message.reply_text("Гружу задачки...", reply_markup=MAIN_MENU)
     try:
         loop = asyncio.get_event_loop()
         text, tasks_raw = await loop.run_in_executor(None, get_active_tasks_full)
@@ -909,7 +909,7 @@ async def handle_report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("📈 Загрузка", callback_data="rtype_workload")],
     ])
     await update.message.reply_text(
-        "Какой отчёт?", reply_markup=keyboard,
+        "Какой отчёт нужен, бро?", reply_markup=keyboard,
     )
 
 
@@ -973,11 +973,11 @@ async def handle_report_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_add_task_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Опиши задачу — текстом или голосом.\n\n"
-        "Можно писать в свободной форме:\n"
-        "<i>«Сделать презентацию для клиента Welcome, дедлайн пятница, важно»</i>\n"
-        "<i>«Купить домен для проекта Альпина, не срочно»</i>\n\n"
-        "Если хочешь создать задачи из транскрипта встречи — пришли аудиофайл (.mp3/.m4a/.wav) или .txt.",
+        "Го задачу! Пиши текстом или кидай голосовое.\n\n"
+        "Можно в свободной форме, я разберусь:\n"
+        "<i>«Сделать презу для Welcome, дедлайн пятница, важно»</i>\n"
+        "<i>«Закупить домен для Альпины, не горит»</i>\n\n"
+        "А если у тебя запись встречи — кидай аудио (.mp3/.m4a/.wav) или .txt, разберу по полочкам.",
         parse_mode="HTML", reply_markup=MAIN_MENU,
     )
     context.user_data["awaiting_task"] = True
@@ -985,21 +985,137 @@ async def handle_add_task_prompt(update: Update, context: ContextTypes.DEFAULT_T
 
 # --- AI-разбор и подтверждение одной задачи ---
 
+# Маппинг callback → название направления
+DIRECTION_CALLBACK_MAP = {
+    "sdir_alpina":   "Альпина",
+    "sdir_welcome":  "Welcome",
+    "sdir_personal": "Личное",
+    "sdir_agency":   "Агентство",
+}
+
+
+def _deadline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Сегодня",      callback_data="sdt_0"),
+            InlineKeyboardButton("Завтра",        callback_data="sdt_1"),
+        ],
+        [
+            InlineKeyboardButton("Через 3 дня",  callback_data="sdt_3"),
+            InlineKeyboardButton("Через неделю", callback_data="sdt_7"),
+        ],
+        [InlineKeyboardButton("Без дедлайна",    callback_data="sdt_skip")],
+    ])
+
+
+def _direction_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Альпина",  callback_data="sdir_alpina"),
+            InlineKeyboardButton("Welcome",  callback_data="sdir_welcome"),
+        ],
+        [
+            InlineKeyboardButton("Личное",   callback_data="sdir_personal"),
+            InlineKeyboardButton("Агентство", callback_data="sdir_agency"),
+        ],
+        [InlineKeyboardButton("Пропустить", callback_data="sdir_skip")],
+    ])
+
+
+def _confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Го создавать!", callback_data="stask_confirm"),
+        InlineKeyboardButton("❌ Не, отбой",    callback_data="stask_cancel"),
+    ]])
+
+
 async def _show_single_task_preview(update, context, task: dict, msg):
-    """Показывает превью задачи и кнопки подтверждения."""
+    """Показывает превью задачи и определяет первый недостающий шаг."""
     user_id = update.effective_user.id
     pending_single_task[user_id] = task
     preview = format_single_task_preview(task)
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Создать", callback_data="stask_confirm"),
-        InlineKeyboardButton("Отмена", callback_data="stask_cancel"),
-    ]])
+
+    if not task.get("deadline"):
+        task["_step"] = "confirm_deadline"
+        text = preview + "\n\n⏰ Братан, дедлайна не было. Поставим?"
+        keyboard = _deadline_keyboard()
+    elif not task.get("direction"):
+        task["_step"] = "confirm_direction"
+        text = preview + "\n\n📦 Какое направление? Или пропустим?"
+        keyboard = _direction_keyboard()
+    else:
+        task["_step"] = "ready"
+        text = preview
+        keyboard = _confirm_keyboard()
+
     await context.bot.edit_message_text(
-        preview,
+        text,
         chat_id=update.effective_chat.id,
         message_id=msg.message_id,
         parse_mode="HTML",
         reply_markup=keyboard,
+    )
+
+
+async def _advance_to_direction_or_confirm(query, task: dict) -> None:
+    """После выбора дедлайна: переходим к направлению или к финальному превью."""
+    preview = format_single_task_preview(task)
+    if not task.get("direction"):
+        task["_step"] = "confirm_direction"
+        await query.edit_message_text(
+            preview + "\n\n📦 Какое направление? Или пропустим?",
+            parse_mode="HTML",
+            reply_markup=_direction_keyboard(),
+        )
+    else:
+        task["_step"] = "ready"
+        await query.edit_message_text(
+            preview,
+            parse_mode="HTML",
+            reply_markup=_confirm_keyboard(),
+        )
+
+
+async def handle_stask_deadline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора дедлайна (sdt_)."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    task = pending_single_task.get(user_id)
+    if not task:
+        await query.edit_message_text("Братан, сессия протухла. Давай по новой.")
+        return
+
+    choice = query.data.replace("sdt_", "")
+    if choice != "skip":
+        days = int(choice)
+        dl_date = date.today() + timedelta(days=days)
+        task["deadline"] = dl_date.strftime("%Y-%m-%d")
+
+    await _advance_to_direction_or_confirm(query, task)
+
+
+async def handle_stask_direction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора направления (sdir_)."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    task = pending_single_task.get(user_id)
+    if not task:
+        await query.edit_message_text("Братан, сессия протухла. Давай по новой.")
+        return
+
+    if query.data != "sdir_skip":
+        direction = DIRECTION_CALLBACK_MAP.get(query.data)
+        if direction:
+            task["direction"] = direction
+
+    task["_step"] = "ready"
+    preview = format_single_task_preview(task)
+    await query.edit_message_text(
+        preview,
+        parse_mode="HTML",
+        reply_markup=_confirm_keyboard(),
     )
 
 
@@ -1011,19 +1127,19 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
 
     if query.data == "stask_cancel":
         pending_single_task.pop(user_id, None)
-        await query.edit_message_text("Отменено.")
+        await query.edit_message_text("Отбой, не вопрос.")
         return
 
     task = pending_single_task.pop(user_id, None)
     if not task:
-        await query.edit_message_text("Сессия истекла. Начни заново.")
+        await query.edit_message_text("Братан, сессия протухла. Давай по новой.")
         return
 
-    await query.edit_message_text("Создаю задачу...")
+    await query.edit_message_text("Погнали, создаю...")
     loop = asyncio.get_event_loop()
     column_id = await loop.run_in_executor(None, find_column_id, ["Надо сделать"])
     if not column_id:
-        await query.edit_message_text("Колонка 'Надо сделать' не найдена.")
+        await query.edit_message_text("Блин, колонку 'Надо сделать' не нашёл. Чекни доску.")
         return
 
     ok, data = await loop.run_in_executor(None, create_yougile_task, task, column_id)
@@ -1055,7 +1171,7 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
     sub_line = f"\nПодзадач создано: {len(subtasks)}" if subtasks else ""
 
     await query.edit_message_text(
-        f"Создана!{key_str}\n<b>{esc(task['title'][:80])}</b>"
+        f"Задача залетела! 🚀{key_str}\n<b>{esc(task['title'][:80])}</b>"
         f"\nПриоритет: {p_label}{dl_line}{dir_line}{sub_line}"
         f"\n<a href=\"{task_url(tid)}\">Открыть в YouGile</a>",
         parse_mode="HTML", disable_web_page_preview=True,
@@ -1072,7 +1188,7 @@ async def prioritize_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("🤖 AI расставить приоритеты", callback_data="prio_ai")],
     ])
     await update.message.reply_text(
-        "🎯 <b>Анализ задач</b>\nЧто показать?",
+        "🎯 <b>Чё анализируем?</b>",
         parse_mode="HTML", reply_markup=keyboard,
     )
 
@@ -1171,14 +1287,14 @@ async def handle_prio_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def chat_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_history.pop(update.effective_user.id, None)
     context.user_data.clear()
-    await update.message.reply_text("Чат сброшен.", reply_markup=MAIN_MENU)
+    await update.message.reply_text("Чат обнулён. Как будто ничего не было 😎", reply_markup=MAIN_MENU)
 
 
 # --- Голосовое → задача (с полным AI-разбором) ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Голосовое используется для создания одной задачи только если ожидается задача,
     # либо всегда (удобнее — всегда разбираем как задачу)
-    msg = await update.message.reply_text("Распознаю голосовое...")
+    msg = await update.message.reply_text("Секунду, слушаю...")
     voice_path = "voice.ogg"
     try:
         voice_file = await update.message.voice.get_file()
@@ -1189,7 +1305,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_single_task_preview(update, context, task, msg)
     except json.JSONDecodeError:
         await context.bot.edit_message_text(
-            "AI вернул невалидный JSON. Попробуй ещё раз.",
+            "Что-то AI затупил. Попробуй по-другому сказать.",
             chat_id=update.effective_chat.id, message_id=msg.message_id,
         )
     except Exception as e:
@@ -1291,7 +1407,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if query.data == "meeting_cancel":
         pending_tasks.pop(user_id, None)
-        await query.edit_message_text("Отменено.")
+        await query.edit_message_text("Отбой, не вопрос.")
         return
 
     if query.data != "meeting_confirm":
@@ -1349,14 +1465,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Если ожидаем задачу (после нажатия ➕) — разбираем через AI
     if context.user_data.get("awaiting_task"):
         context.user_data.pop("awaiting_task", None)
-        msg = await update.message.reply_text("Разбираю задачу...")
+        msg = await update.message.reply_text("Разбираю, чё написал...")
         try:
             loop = asyncio.get_event_loop()
             task = await loop.run_in_executor(None, parse_single_task, text)
             await _show_single_task_preview(update, context, task, msg)
         except json.JSONDecodeError:
             await context.bot.edit_message_text(
-                "AI вернул невалидный JSON. Попробуй переформулировать.",
+                "Что-то AI затупил. Попробуй по-другому сказать.",
                 chat_id=update.effective_chat.id, message_id=msg.message_id,
             )
         except Exception as e:
@@ -1406,8 +1522,10 @@ if __name__ == "__main__":
     ))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_txt_file))
 
-    # Callbacks — создание одной задачи (подтверждение/отмена)
-    app.add_handler(CallbackQueryHandler(handle_single_task_callback, pattern="^stask_"))
+    # Callbacks — создание одной задачи (дедлайн / направление / подтверждение)
+    app.add_handler(CallbackQueryHandler(handle_stask_deadline_callback,   pattern="^sdt_"))
+    app.add_handler(CallbackQueryHandler(handle_stask_direction_callback,  pattern="^sdir_"))
+    app.add_handler(CallbackQueryHandler(handle_single_task_callback,      pattern="^stask_"))
     # Callbacks — отчёты
     app.add_handler(CallbackQueryHandler(handle_report_type_callback, pattern="^rtype_"))
     app.add_handler(CallbackQueryHandler(handle_report_callback, pattern="^report_"))
