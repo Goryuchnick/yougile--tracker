@@ -952,7 +952,48 @@ async def handle_task_board_callback(update: Update, context: ContextTypes.DEFAU
 
 
 async def handle_task_deadline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 3: создание задачи."""
+    """Шаг 3: выбор приоритета."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    draft = task_draft.get(user_id)
+    if not draft:
+        await query.edit_message_text("Сессия истекла. Начни заново.")
+        return
+
+    if query.data == "tdl_cancel":
+        task_draft.pop(user_id, None)
+        await query.edit_message_text("Отменено.")
+        return
+
+    # Сохраняем дедлайн
+    if query.data != "tdl_none":
+        days_offset = int(query.data.replace("tdl_", ""))
+        dl_date = date.today() + timedelta(days=days_offset)
+        draft["deadline"] = dl_date.strftime("%Y-%m-%d")
+        draft["deadline_label"] = dl_date.strftime("%d.%m.%Y")
+    else:
+        draft["deadline"] = None
+        draft["deadline_label"] = "без дедлайна"
+
+    draft["step"] = "priority"
+
+    buttons = [
+        [InlineKeyboardButton("🔴 Высокий", callback_data="tprio_High"),
+         InlineKeyboardButton("🟡 Средний", callback_data="tprio_Medium")],
+        [InlineKeyboardButton("🟢 Низкий", callback_data="tprio_Low"),
+         InlineKeyboardButton("⚪ Без приоритета", callback_data="tprio_none")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="tprio_cancel")],
+    ]
+
+    await query.edit_message_text(
+        f"<b>{esc(draft['title'][:60])}</b>\n\nПриоритет?",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def handle_task_priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Шаг 4: создание задачи в колонке 'Надо сделать'."""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -961,48 +1002,48 @@ async def handle_task_deadline_callback(update: Update, context: ContextTypes.DE
         await query.edit_message_text("Сессия истекла. Начни заново.")
         return
 
-    if query.data == "tdl_cancel":
+    if query.data == "tprio_cancel":
         await query.edit_message_text("Отменено.")
         return
 
-    # Определяем дедлайн
-    deadline_str = None
-    deadline_label = "без дедлайна"
-    if query.data != "tdl_none":
-        days_offset = int(query.data.replace("tdl_", ""))
-        dl_date = date.today() + timedelta(days=days_offset)
-        deadline_str = dl_date.strftime("%Y-%m-%d")
-        deadline_label = dl_date.strftime("%d.%m.%Y")
+    # Приоритет
+    priority_key = query.data.replace("tprio_", "")
+    priority = priority_key if priority_key in PRIORITY_STATES else None
+    p_label = {"High": "🔴 Высокий", "Medium": "🟡 Средний", "Low": "🟢 Низкий"}.get(priority, "⚪ Без")
 
-    await query.edit_message_text(f"Создаю задачу...")
+    await query.edit_message_text("Создаю задачу...")
 
-    # Находим первую колонку доски
+    # Находим колонку "Надо сделать"
     loop = asyncio.get_event_loop()
     columns = await loop.run_in_executor(None, get_columns_by_board, draft["board_id"])
-    target_cols = ["Входящие", "Надо сделать", "Бэклог"]
     column_id = None
     for col in columns:
-        if col.get("title") in target_cols:
+        if col.get("title") == "Надо сделать":
             column_id = col["id"]
             break
     if not column_id and columns:
         column_id = columns[0]["id"]
     if not column_id:
-        await query.edit_message_text("Колонка не найдена.")
+        await query.edit_message_text("Колонка 'Надо сделать' не найдена.")
         return
 
-    task_data = {"title": draft["title"], "description": "", "priority": "Medium"}
-    if deadline_str:
-        task_data["deadline"] = deadline_str
+    task_data = {"title": draft["title"], "description": ""}
+    if priority:
+        task_data["priority"] = priority
+    if draft.get("deadline"):
+        task_data["deadline"] = draft["deadline"]
 
     ok, data = await loop.run_in_executor(None, create_yougile_task, task_data, column_id)
     if ok:
         tid = data.get("id", "")
         key = data.get("idTaskProject") or data.get("key") or ""
         key_str = f" <code>{esc(key)}</code>" if key else ""
-        dl_info = f"\n📅 {deadline_label}" if deadline_str else ""
+        dl_label = draft.get("deadline_label", "без дедлайна")
+        dl_info = f"\n📅 {dl_label}" if draft.get("deadline") else ""
         await query.edit_message_text(
-            f"✅ Создана!{key_str}\n<b>{esc(draft['title'][:80])}</b>{dl_info}\n🔗 <a href=\"{task_url(tid)}\">Открыть</a>",
+            f"✅ Создана!{key_str}\n<b>{esc(draft['title'][:80])}</b>"
+            f"\n{p_label}{dl_info}"
+            f"\n🔗 <a href=\"{task_url(tid)}\">Открыть</a>",
             parse_mode="HTML", disable_web_page_preview=True,
         )
     else:
@@ -1365,6 +1406,7 @@ if __name__ == "__main__":
     # Callbacks — пошаговое создание задачи
     app.add_handler(CallbackQueryHandler(handle_task_board_callback, pattern="^tboard_"))
     app.add_handler(CallbackQueryHandler(handle_task_deadline_callback, pattern="^tdl_"))
+    app.add_handler(CallbackQueryHandler(handle_task_priority_callback, pattern="^tprio_"))
     # Callbacks — отчёты
     app.add_handler(CallbackQueryHandler(handle_report_type_callback, pattern="^rtype_"))
     app.add_handler(CallbackQueryHandler(handle_report_callback, pattern="^report_"))
