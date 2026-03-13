@@ -11,13 +11,9 @@ YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
 YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-# Протестированные модели 2026-03-05
-# Приоритизация = простая классификация, дешёвые модели хватит
 MODELS = [
-    "qwen/qwen-turbo",                        # 0.8s, $0.03/M — быстрый, дешёвый
-    "arcee-ai/trinity-large-preview:free",     # 1.1s, бесплатная
-    "google/gemma-3-4b-it:free",               # 1.5s, бесплатная
-    "mistralai/mistral-nemo",                  # 1.4s, $0.02/M
+    "google/gemini-3.1-flash-lite-preview",   # $0.25/M — для классификации хватит
+    "google/gemini-3-flash-preview",           # $0.50/M — fallback
 ]
 
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"

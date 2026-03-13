@@ -25,30 +25,24 @@ YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
 YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# Модели OpenRouter — протестированы 2026-03-05
-# Чат: бесплатные (простые ответы, не критично)
+# Чат: дешёвая + free fallback
 MODELS_CHAT = [
-    "arcee-ai/trinity-large-preview:free",     # 1.1s
-    "google/gemma-3-4b-it:free",               # 1.5s
-    "google/gemma-3n-e4b-it:free",             # 1.3s
-    "liquid/lfm-2.5-1.2b-instruct:free",      # 1.1s
-    "mistralai/mistral-nemo",                  # 1.4s, $0.02/M — запас
+    "google/gemini-3.1-flash-lite-preview",  # $0.25/M — стабильная, дешёвая
+    "arcee-ai/trinity-large-preview:free",    # fallback free
 ]
-# Задачи: умные модели (JSON, извлечение, приоритизация)
+# Задачи: умная модель для JSON-парсинга и отчётов
 MODELS_TASK = [
-    "qwen/qwen-turbo",                        # 0.8s, $0.03/M — быстрый, хороший JSON
-    "mistralai/mistral-nemo",                  # 1.4s, $0.02/M
-    "microsoft/phi-4",                         # 0.9s, $0.06/M
+    "google/gemini-3-flash-preview",          # $0.50/M — отличный JSON, быстрый
+    "google/gemini-3.1-flash-lite-preview",   # $0.25/M — fallback
 ]
-# Анализ: саммари/рекомендации (не нужен JSON, можно бесплатные)
+# Анализ: саммари/рекомендации
 MODELS_ANALYSIS = [
-    "arcee-ai/trinity-large-preview:free",     # 1.1s — бесплатная, хороший текст
-    "google/gemma-3-4b-it:free",               # 1.5s
-    "mistralai/mistral-nemo",                  # 1.4s, $0.02/M — запас
+    "google/gemini-3.1-flash-lite-preview",   # $0.25/M — хватит для текста
+    "mistralai/mistral-nemo",                 # $0.02/M — fallback
 ]
-# Аудио: транскрипция голоса/встреч
+# Аудио: транскрипция голоса
 MODELS_AUDIO = [
-    "google/gemini-2.0-flash-lite-001",        # 1.1s, $0.075/M
+    "google/gemini-3-flash-preview",          # мультимодальный, поддерживает аудио
 ]
 
 # Стикеры приоритета
@@ -92,9 +86,11 @@ logger = logging.getLogger(__name__)
 
 # --- Состояние ---
 pending_tasks: dict[int, list[dict]] = {}
-chat_history:  dict[int, list[dict]] = {}
+chat_history:    dict[int, list[dict]] = {}
+chat_history_ts: dict[int, float] = {}  # timestamp последнего сообщения (для TTL 2 ч)
 task_draft:    dict[int, dict] = {}   # user_id -> {title, description, step, board_id, ...}
 pending_single_task: dict[int, dict] = {}  # user_id -> разобранная одна задача
+pending_report: dict[int, dict] = {}       # user_id -> {"days": int}
 
 # Mini App URL
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://yougile-webhook.147.45.184.108.sslip.io/app")
@@ -180,6 +176,12 @@ def ai_generate(prompt: str) -> str:
 
 
 def ai_chat(user_id: int, user_text: str) -> str:
+    # Авто-сброс если прошло больше 2 часов
+    last_ts = chat_history_ts.get(user_id, 0)
+    if time.time() - last_ts > 7200:
+        chat_history.pop(user_id, None)
+    chat_history_ts[user_id] = time.time()
+
     history = chat_history.get(user_id, [])
     messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
     messages.extend(history)
@@ -458,268 +460,113 @@ def ai_active_analysis(tasks_raw: list[dict]) -> str:
         return ""
 
 
-# --- Функция 3: Отчёт за период ---
-def get_completed_report(days: int = 7) -> str:
-    """Собирает выполненные задачи за N дней с подзадачами и комментами."""
-    columns = get_columns()
-    if not columns:
-        return "Не удалось получить колонки."
-
-    cutoff_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-    completed_tasks = []
-
-    # Ищем завершённые задачи во всех колонках
-    for col in columns:
-        tasks = get_column_tasks(col["id"], limit=200)
-        for t in tasks:
-            if t.get("completed"):
-                # completedTimestamp может быть в самой задаче или нет
-                # Если есть — фильтруем по периоду
-                ct = t.get("completedTimestamp") or t.get("timestamp", 0)
-                if ct >= cutoff_ts:
-                    t["_column"] = col["title"]
-                    completed_tasks.append(t)
-
-    if not completed_tasks:
-        return f"За последние {days} дн. нет завершённых задач."
-
-    # Сортируем: новые сверху
-    completed_tasks.sort(key=lambda t: t.get("completedTimestamp") or t.get("timestamp", 0), reverse=True)
-
-    lines = [f"📊 <b>Отчёт за {days} дн.</b> — {len(completed_tasks)} задач выполнено\n"]
-
-    for t in completed_tasks[:20]:
-        key = t.get("idTaskProject") or t.get("idTaskCommon") or ""
-        key_str = f"<code>{esc(key)}</code> " if key else ""
-        stickers = t.get("stickers") or {}
-        priority = PRIORITY_MAP_INV.get(stickers.get(STICKER_PRIORITY_ID, ""), "")
-        p_emoji = PRIORITY_EMOJI.get(priority, "⚪")
-
-        # Дата завершения
-        ct = t.get("completedTimestamp") or t.get("timestamp", 0)
-        done_date = datetime.fromtimestamp(ct / 1000).strftime("%d.%m") if ct else ""
-        date_str = f" ({done_date})" if done_date else ""
-
-        # Описание из task-list (без доп. API-запросов)
-        desc = (t.get("description") or "").replace("\n", " ").strip()[:80]
-        desc_str = f"\n  <i>{esc(desc)}</i>" if desc else ""
-
-        lines.append(f"✅ {p_emoji} {key_str}<b>{esc(t['title'][:60])}</b>{date_str}{desc_str}")
-
-    if len(completed_tasks) > 20:
-        lines.append(f"\n<i>...и ещё {len(completed_tasks) - 20} задач</i>")
-
-    return "\n".join(lines)
-
-
-def get_event_report(report_type: str, days: int = 7) -> str:
-    """Отчёт по событиям из event_log (SQLite)."""
-    try:
-        from event_log import query_events, get_activity_summary
-    except ImportError:
-        return "Event log недоступен. Webhook-сервис не запущен."
-
-    type_map = {
-        "created": (["task-created"], "📝 Созданные задачи"),
-        "moved": (["task-moved"], "🔀 Перемещения задач"),
-        "comments": (["chat_message-created"], "💬 Комментарии"),
-        "activity": (["task-created", "task-updated", "task-moved", "task-deleted", "chat_message-created"], "📊 Вся активность"),
-    }
-    event_types, title = type_map.get(report_type, (None, "📊 Отчёт"))
-
-    since_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-    events = query_events(event_types=event_types, since_ms=since_ms, limit=200)
-
-    if not events:
-        # Fallback — если event_log пуст (webhooks ещё не накопили данные)
-        if report_type == "created":
-            return _report_created_from_api(days)
-        return f"Нет событий за {days} дн. Лог событий начнёт заполняться после подключения webhooks."
-
-    lines = [f"{title} <b>за {days} дн.</b> — {len(events)} событий\n"]
-
-    event_labels = {
-        "task-created": "📝",
-        "task-updated": "✏️",
-        "task-moved": "🔀",
-        "task-deleted": "🗑",
-        "task-restored": "♻️",
-        "chat_message-created": "💬",
-    }
-
-    for ev in events[:30]:
-        ts = ev.get("timestamp", 0)
-        dt = datetime.fromtimestamp(ts / 1000).strftime("%d.%m %H:%M") if ts else ""
-        emoji = event_labels.get(ev["event_type"], "•")
-        data = json.loads(ev.get("data") or "{}") if isinstance(ev.get("data"), str) else ev.get("data", {})
-        title_text = data.get("title", ev.get("object_id", "")[:20])
-        lines.append(f"{emoji} {dt} <b>{esc(str(title_text)[:50])}</b>")
-
-    if len(events) > 30:
-        lines.append(f"\n<i>...и ещё {len(events) - 30}</i>")
-
-    return "\n".join(lines)
-
-
-def _report_created_from_api(days: int) -> str:
-    """Fallback: созданные задачи из API (по timestamp)."""
-    columns = get_columns()
-    if not columns:
-        return "Не удалось получить колонки."
-
-    cutoff_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-    created = []
-
-    for col in columns:
-        tasks = get_column_tasks(col["id"], limit=200)
-        for t in tasks:
-            if t.get("timestamp", 0) >= cutoff_ts:
-                t["_column"] = col["title"]
-                created.append(t)
-
-    if not created:
-        return f"За последние {days} дн. нет новых задач."
-
-    created.sort(key=lambda t: t.get("timestamp", 0), reverse=True)
-    lines = [f"📝 <b>Созданные задачи за {days} дн.</b> — {len(created)} шт.\n"]
-
-    for t in created[:20]:
-        key = t.get("idTaskProject") or t.get("idTaskCommon") or ""
-        key_str = f"<code>{esc(key)}</code> " if key else ""
-        ts = t.get("timestamp", 0)
-        dt = datetime.fromtimestamp(ts / 1000).strftime("%d.%m") if ts else ""
-        lines.append(f"📝 {key_str}<b>{esc(t['title'][:60])}</b> ({dt}) → {esc(t.get('_column', ''))}")
-
-    if len(created) > 20:
-        lines.append(f"\n<i>...и ещё {len(created) - 20}</i>")
-
-    return "\n".join(lines)
-
 
 # --- AI-анализ данных ---
-def ai_report_summary(report_text: str, report_type: str, days: int) -> str:
-    """AI-саммари для отчёта. Возвращает текст анализа или '' при ошибке."""
-    plain = strip_html(report_text)[:2000]
-    if len(plain) < 30:
-        return ""
-    type_names = {
-        "completed": "завершённые задачи", "created": "созданные задачи",
-        "moved": "перемещения задач", "comments": "комментарии",
-        "activity": "вся активность", "workload": "загрузка команды",
-    }
-    type_name = type_names.get(report_type, "отчёт")
-    prompt = (
-        f"Ты — аналитик задач. Проанализируй отчёт ({type_name}) за {days} дней.\n\n"
-        f"Отчёт:\n{plain}\n\n"
-        f"Ответь кратко (3-5 пунктов):\n"
-        f"1. Главные достижения или итоги\n"
-        f"2. Узкие места (что буксует или вызывает вопросы)\n"
-        f"3. Рекомендации (на что обратить внимание)\n\n"
-        f"До 500 символов. На русском. Без markdown."
-    )
-    try:
-        return _ai_call(MODELS_ANALYSIS, [{"role": "user", "content": prompt}], max_tokens=600)
-    except Exception as e:
-        logger.warning(f"AI report summary failed: {e}")
-        return ""
 
-
-def get_workload_report(days: int = 7) -> str:
-    """Отчёт по загрузке: активные, созданные, завершённые, по исполнителям."""
+def collect_work_summary(days: int, direction: str | None = None) -> str:
+    """Собирает все данные о работе за период для AI-агрегации."""
     columns = get_columns()
     if not columns:
-        return "Не удалось получить колонки."
-
-    # 1. Текущее состояние по активным колонкам
-    col_counts = {}
-    all_active = []
-    for col in columns:
-        if col["title"] not in ACTIVE_COLUMNS:
-            continue
-        tasks = get_column_tasks(col["id"])
-        active = [t for t in tasks if not t.get("completed") and not t.get("archived")]
-        col_counts[col["title"]] = len(active)
-        all_active.extend(active)
-
-    total_active = sum(col_counts.values())
-
-    # 2. Создано / завершено за период из event_log
-    created_count = 0
-    completed_count = 0
-    since_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-    try:
-        from event_log import query_events
-        created_events = query_events(event_types=["task-created"], since_ms=since_ms, limit=500)
-        created_count = len(created_events)
-        updated_events = query_events(event_types=["task-updated"], since_ms=since_ms, limit=500)
-        for ev in updated_events:
-            data = json.loads(ev.get("data") or "{}") if isinstance(ev.get("data"), str) else ev.get("data", {})
-            if data.get("completed"):
-                completed_count += 1
-    except Exception:
-        # Fallback: считаем завершённые из API
-        cutoff_ts = since_ms
-        for col in columns:
-            for t in get_column_tasks(col["id"], limit=200):
-                if t.get("completed"):
-                    ct = t.get("completedTimestamp") or t.get("timestamp", 0)
-                    if ct >= cutoff_ts:
-                        completed_count += 1
-                elif t.get("timestamp", 0) >= cutoff_ts and col["title"] in ACTIVE_COLUMNS:
-                    created_count += 1
-
-    # 3. По исполнителям (текущие активные)
-    assignee_counts: dict[str, int] = {}
-    for t in all_active:
-        for uid in (t.get("assigned") or []):
-            name = resolve_user_name(uid) or uid[:8]
-            assignee_counts[name] = assignee_counts.get(name, 0) + 1
-    unassigned = sum(1 for t in all_active if not t.get("assigned"))
-
-    # 4. Форматируем
-    cols_str = " | ".join(f"{k}: {v}" for k, v in col_counts.items())
-    delta = created_count - completed_count
-    delta_emoji = "📈" if delta > 0 else ("📉" if delta < 0 else "➡️")
-    delta_sign = f"+{delta}" if delta > 0 else str(delta)
-
-    lines = [
-        f"📈 <b>Загрузка за {days} дн.</b>\n",
-        f"📊 Активных: <b>{total_active}</b>",
-        f"  {cols_str}\n",
-        f"📝 Создано: <b>{created_count}</b>  ✅ Завершено: <b>{completed_count}</b>",
-        f"{delta_emoji} Бэклог: <b>{delta_sign}</b>\n",
-    ]
-
-    if assignee_counts:
-        lines.append("👥 <b>Исполнители:</b>")
-        for name, cnt in sorted(assignee_counts.items(), key=lambda x: -x[1]):
-            lines.append(f"  {esc(name)}: {cnt} задач")
-    if unassigned:
-        lines.append(f"  <i>Без исполнителя: {unassigned}</i>")
-
-    return "\n".join(lines)
-
-
-def ai_workload_analysis(report_text: str, days: int) -> str:
-    """AI-анализ загрузки команды."""
-    plain = strip_html(report_text)[:1500]
-    if len(plain) < 20:
         return ""
+
+    cutoff_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+
+    completed_items = []
+    active_items = []
+    processed_detail = 0  # счётчик задач, для которых тянем комменты + подзадачи
+
+    for col in columns:
+        tasks = get_column_tasks(col["id"], limit=200)
+        for t in tasks:
+            # Фильтр по направлению
+            if direction:
+                stickers = t.get("stickers") or {}
+                task_dir_state = stickers.get(STICKER_DIRECTION_ID)
+                if task_dir_state != DIRECTION_STATES.get(direction):
+                    continue
+
+            title = t["title"]
+            task_id = t["id"]
+
+            # Завершённые за период
+            if t.get("completed"):
+                ct = t.get("completedTimestamp") or t.get("timestamp", 0)
+                if ct >= cutoff_ts:
+                    desc = strip_html((t.get("description") or ""))[:200].strip()
+                    completed_items.append(f"- {title}" + (f": {desc}" if desc else ""))
+
+            # Активные задачи — собираем свежие комменты и подзадачи
+            elif col["title"] in ACTIVE_COLUMNS:
+                task_info = f"- {title} [колонка: {col['title']}]"
+
+                if processed_detail < 50:
+                    processed_detail += 1
+
+                    # Проверяем подзадачи
+                    subtask_ids = t.get("subtasks") or []
+                    done_subs = []
+                    total_subs = len(subtask_ids)
+                    for sid in subtask_ids:
+                        try:
+                            sr = requests.get(f"{YOUGILE_BASE_URL}/tasks/{sid}", headers=_headers())
+                            if sr.status_code == 200:
+                                sub = sr.json()
+                                if sub.get("completed"):
+                                    sub_ct = sub.get("completedTimestamp") or sub.get("timestamp", 0)
+                                    if sub_ct >= cutoff_ts:
+                                        done_subs.append(sub["title"])
+                        except Exception:
+                            pass
+
+                    if done_subs:
+                        task_info += f"\n  Выполнены подзадачи: {', '.join(done_subs)}"
+                    if total_subs:
+                        task_info += f"\n  Подзадач: {len(done_subs)}/{total_subs} выполнено"
+
+                    # Свежие комменты
+                    try:
+                        cr = requests.get(
+                            f"{YOUGILE_BASE_URL}/chats/{task_id}/messages",
+                            headers=_headers(), params={"since": cutoff_ts, "limit": 10},
+                        )
+                        if cr.status_code == 200:
+                            msgs = cr.json().get("content", [])
+                            for m in msgs:
+                                comment_text = strip_html((m.get("text") or ""))[:150].strip()
+                                if comment_text:
+                                    task_info += f"\n  Коммент: {comment_text}"
+                    except Exception:
+                        pass
+
+                active_items.append(task_info)
+
+    parts = []
+    if completed_items:
+        parts.append("ЗАВЕРШЁННЫЕ ЗАДАЧИ:\n" + "\n".join(completed_items))
+    if active_items:
+        parts.append("АКТИВНЫЕ ЗАДАЧИ (с прогрессом):\n" + "\n".join(active_items))
+
+    return "\n\n".join(parts) if parts else "Нет данных за этот период."
+
+
+def ai_work_summary(raw_data: str, days: int, direction: str | None) -> str:
+    """AI-агрегация сводного отчёта о проделанной работе."""
+    dir_label = direction or "все"
     prompt = (
-        f"Ты — аналитик загруженности команды. Данные за {days} дней:\n\n"
-        f"{plain}\n\n"
-        f"Ответь кратко:\n"
-        f"1. Тренд: бэклог растёт или сокращается?\n"
-        f"2. Баланс: создание vs завершение\n"
-        f"3. Загрузка: кто перегружен?\n"
-        f"4. Рекомендация: что улучшить\n\n"
-        f"До 500 символов. На русском. Без markdown."
+        f"Ты — Вася, пацанский AI-помощник. Составь краткий отчёт о проделанной работе.\n"
+        f"Период: {days} дней. Направление: {dir_label}.\n\n"
+        f"Данные:\n{raw_data}\n\n"
+        f"Составь отчёт строго в формате:\n\n"
+        f"Сделано:\n1. [краткое описание что сделано]\n2. ...\n\n"
+        f"В процессе:\n1. [что делается, какой прогресс]\n2. ...\n\n"
+        f"Будь краток, объединяй мелкие подзадачи в общие пункты. "
+        f"Пиши по-русски, по-деловому но дружелюбно. Без markdown-символов."
     )
     try:
-        return _ai_call(MODELS_ANALYSIS, [{"role": "user", "content": prompt}], max_tokens=600)
+        return _ai_call(MODELS_TASK, [{"role": "user", "content": prompt}], max_tokens=800)
     except Exception as e:
-        logger.warning(f"AI workload analysis failed: {e}")
-        return ""
+        logger.warning(f"AI work summary failed: {e}")
+        return "AI недоступен, попробуй позже."
 
 
 # --- Промпт и разбор одной задачи ---
@@ -900,74 +747,77 @@ async def handle_active_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает выбор типа отчёта."""
+    """Показывает выбор периода для сводного отчёта."""
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Завершённые", callback_data="rtype_completed"),
-         InlineKeyboardButton("📝 Созданные", callback_data="rtype_created")],
-        [InlineKeyboardButton("🔀 Перемещения", callback_data="rtype_moved"),
-         InlineKeyboardButton("💬 Комментарии", callback_data="rtype_comments")],
-        [InlineKeyboardButton("📊 Вся активность", callback_data="rtype_activity")],
-        [InlineKeyboardButton("📈 Загрузка", callback_data="rtype_workload")],
+        [InlineKeyboardButton("3 дня", callback_data="rep_3"),
+         InlineKeyboardButton("Неделя", callback_data="rep_7")],
+        [InlineKeyboardButton("2 недели", callback_data="rep_14"),
+         InlineKeyboardButton("Месяц", callback_data="rep_30")],
     ])
     await update.message.reply_text(
-        "Какой отчёт нужен, бро?", reply_markup=keyboard,
+        "За какой период сделать отчёт, бро?", reply_markup=keyboard,
     )
 
 
-async def handle_report_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выбор типа отчёта → выбор периода."""
+async def handle_report_period_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор периода → выбор направления."""
     query = update.callback_query
     await query.answer()
-    report_type = query.data.replace("rtype_", "")
-    context.user_data["report_type"] = report_type
+    user_id = update.effective_user.id
+    days = int(query.data.replace("rep_", ""))
+    pending_report[user_id] = {"days": days}
+
+    period_labels = {3: "3 дня", 7: "неделя", 14: "2 недели", 30: "месяц"}
+    label = period_labels.get(days, f"{days} дней")
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("3 дня", callback_data="report_3"),
-         InlineKeyboardButton("7 дней", callback_data="report_7"),
-         InlineKeyboardButton("14 дней", callback_data="report_14")],
-        [InlineKeyboardButton("30 дней", callback_data="report_30")],
+        [InlineKeyboardButton("Альпина", callback_data="rdir_alpina"),
+         InlineKeyboardButton("Welcome", callback_data="rdir_welcome")],
+        [InlineKeyboardButton("Личное", callback_data="rdir_personal"),
+         InlineKeyboardButton("Агентство", callback_data="rdir_agency")],
+        [InlineKeyboardButton("Все направления", callback_data="rdir_all")],
     ])
-    type_labels = {
-        "completed": "✅ Завершённые",
-        "created": "📝 Созданные",
-        "moved": "🔀 Перемещения",
-        "comments": "💬 Комментарии",
-        "activity": "📊 Вся активность",
-        "workload": "📈 Загрузка",
-    }
-    label = type_labels.get(report_type, report_type)
-    await query.edit_message_text(f"{label}\nЗа какой период?", reply_markup=keyboard)
+    await query.edit_message_text(
+        f"Период: {label}. Какое направление?", reply_markup=keyboard,
+    )
 
 
-async def handle_report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_report_direction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор направления → сбор данных + AI-отчёт."""
     query = update.callback_query
     await query.answer()
-    days = int(query.data.replace("report_", ""))
-    report_type = context.user_data.pop("report_type", "completed")
+    user_id = update.effective_user.id
 
-    await query.edit_message_text(f"Собираю отчёт за {days} дн....")
+    report_data = pending_report.pop(user_id, None)
+    if not report_data:
+        await query.edit_message_text("Сессия протухла, давай по новой — жми Отчёт.")
+        return
+
+    days = report_data["days"]
+    direction_map = {
+        "rdir_alpina":   "Альпина",
+        "rdir_welcome":  "Welcome",
+        "rdir_personal": "Личное",
+        "rdir_agency":   "Агентство",
+        "rdir_all":      None,
+    }
+    direction = direction_map.get(query.data)
+    dir_label = direction or "все направления"
+    period_labels = {3: "3 дня", 7: "неделю", 14: "2 недели", 30: "месяц"}
+    period_label = period_labels.get(days, f"{days} дней")
+
+    await query.edit_message_text(f"Собираю данные за {period_label} ({dir_label})...")
+
     try:
         loop = asyncio.get_event_loop()
-        if report_type == "completed":
-            text = await loop.run_in_executor(None, get_completed_report, days)
-        elif report_type == "workload":
-            text = await loop.run_in_executor(None, get_workload_report, days)
-        elif report_type in ("created", "moved", "comments", "activity"):
-            text = await loop.run_in_executor(None, get_event_report, report_type, days)
-        else:
-            text = await loop.run_in_executor(None, get_completed_report, days)
-        await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True)
-        # AI-анализ вторым сообщением
-        if report_type == "workload":
-            ai_text = await loop.run_in_executor(None, ai_workload_analysis, text, days)
-        else:
-            ai_text = await loop.run_in_executor(None, ai_report_summary, text, report_type, days)
-        if ai_text:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"🤖 <b>Анализ:</b>\n{esc(ai_text)}",
-                parse_mode="HTML",
-            )
+        raw = await loop.run_in_executor(None, collect_work_summary, days, direction)
+        ai_text = await loop.run_in_executor(None, ai_work_summary, raw, days, direction)
+
+        header = f"<b>Отчёт за {period_label}</b> | {esc(dir_label)}\n\n"
+        await query.edit_message_text(
+            header + esc(ai_text),
+            parse_mode="HTML",
+        )
     except Exception as e:
         await query.edit_message_text(f"Ошибка: {esc(e)}")
 
@@ -1528,8 +1378,8 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(handle_stask_direction_callback,  pattern="^sdir_"))
     app.add_handler(CallbackQueryHandler(handle_single_task_callback,      pattern="^stask_"))
     # Callbacks — отчёты
-    app.add_handler(CallbackQueryHandler(handle_report_type_callback, pattern="^rtype_"))
-    app.add_handler(CallbackQueryHandler(handle_report_callback, pattern="^report_"))
+    app.add_handler(CallbackQueryHandler(handle_report_period_callback,    pattern="^rep_"))
+    app.add_handler(CallbackQueryHandler(handle_report_direction_callback, pattern="^rdir_"))
     # Callbacks — анализ задач
     app.add_handler(CallbackQueryHandler(handle_prio_callback, pattern="^prio_"))
     # Callbacks — прочее

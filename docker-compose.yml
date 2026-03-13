@@ -59,8 +59,6 @@ services:
         while true; do
           echo "[$(date)] Running ai_prioritizer..."
           python bot/ai_prioritizer.py
-          echo "[$(date)] Running knowledge_base_sync..."
-          python bot/knowledge_base_sync.py
           echo "[$(date)] Sleeping 24h..."
           sleep 86400
         done
