@@ -61,6 +61,15 @@ PRIORITY_STATES = {
 PRIORITY_MAP_INV = {v: k for k, v in PRIORITY_STATES.items()}
 PRIORITY_EMOJI   = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
 
+# Стикеры направления
+STICKER_DIRECTION_ID = "54176f3d-77ff-4eb9-a70c-70caa96910e3"
+DIRECTION_STATES = {
+    "Альпина":   "8d4f534aec91",
+    "Welcome":   "2a1cba107dfd",
+    "Личное":    "413cd49fb4c4",
+    "Агентство": "00db86f5a160",
+}
+
 # Проект и доска
 TARGET_PROJECT = "Продуктивность"
 TARGET_BOARD   = "Задачи лог"
@@ -84,7 +93,8 @@ logger = logging.getLogger(__name__)
 # --- Состояние ---
 pending_tasks: dict[int, list[dict]] = {}
 chat_history:  dict[int, list[dict]] = {}
-task_draft:    dict[int, dict] = {}  # user_id -> {title, description, step, board_id, ...}
+task_draft:    dict[int, dict] = {}   # user_id -> {title, description, step, board_id, ...}
+pending_single_task: dict[int, dict] = {}  # user_id -> разобранная одна задача
 
 # Mini App URL
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://yougile-webhook.147.45.184.108.sslip.io/app")
@@ -322,9 +332,15 @@ def create_yougile_task(task: dict, column_id: str) -> tuple[bool, dict | str]:
             body["deadline"] = {"deadline": int(dl.timestamp() * 1000), "withTime": False}
         except ValueError:
             pass
+    stickers = {}
     priority = task.get("priority", "Medium")
     if priority in PRIORITY_STATES:
-        body["stickers"] = {STICKER_PRIORITY_ID: PRIORITY_STATES[priority]}
+        stickers[STICKER_PRIORITY_ID] = PRIORITY_STATES[priority]
+    direction = task.get("direction")
+    if direction and direction in DIRECTION_STATES:
+        stickers[STICKER_DIRECTION_ID] = DIRECTION_STATES[direction]
+    if stickers:
+        body["stickers"] = stickers
     items = task.get("checklist", [])
     if items:
         body["checklists"] = [{"title": "Чеклист",
@@ -705,6 +721,94 @@ def ai_workload_analysis(report_text: str, days: int) -> str:
         return ""
 
 
+# --- Промпт и разбор одной задачи ---
+def _task_parse_prompt(today: str) -> str:
+    directions = ", ".join(DIRECTION_STATES.keys())
+    return (
+        f"Сегодня {today}. Ты — ассистент по задачам. "
+        f"Пользователь описывает одну задачу свободным текстом или голосом. "
+        f"Извлеки из описания:\n"
+        f'- "title": краткий заголовок задачи, до 80 символов\n'
+        f'- "description": дополнительный контекст или детали (может быть пустым)\n'
+        f'- "deadline": дата в формате YYYY-MM-DD или null (понедельник/пятница/через неделю — рассчитай от сегодня)\n'
+        f'- "priority": "High" (важно/срочно), "Medium" (нормально/обычно), "Low" (не срочно/не важно). '
+        f'Если не указано — "Medium"\n'
+        f'- "direction": одно из [{directions}] или null. Определяй по названиям проектов/контексту\n'
+        f'- "subtasks": массив строк — подзадачи/шаги (если перечислены), иначе []\n\n'
+        f"Верни только JSON-объект без пояснений."
+    )
+
+
+def parse_single_task(text: str) -> dict:
+    """Разбирает свободный текст в структуру одной задачи через AI."""
+    today = date.today().strftime("%Y-%m-%d")
+    prompt = _task_parse_prompt(today) + f"\n\nОписание задачи:\n{text}"
+    raw = ai_generate(prompt)
+    return json.loads(_clean_json(raw))
+
+
+def parse_single_task_from_audio(file_path: str) -> dict:
+    """Разбирает голосовое сообщение в структуру одной задачи через AI."""
+    today = date.today().strftime("%Y-%m-%d")
+    prompt = _task_parse_prompt(today) + "\n\nПрослушай запись и извлеки задачу."
+    raw = ai_audio(file_path, prompt)
+    return json.loads(_clean_json(raw))
+
+
+def format_single_task_preview(task: dict) -> str:
+    """Форматирует превью одной задачи в HTML."""
+    priority = task.get("priority", "Medium")
+    p_emoji = PRIORITY_EMOJI.get(priority, "⚪")
+    priority_labels = {"High": "Важно", "Medium": "Нормально", "Low": "Не важно"}
+    p_label = priority_labels.get(priority, priority)
+
+    lines = [f"<b>{esc(task.get('title', '—'))}</b>"]
+
+    desc = (task.get("description") or "").strip()
+    if desc:
+        lines.append(f"<i>{esc(desc[:200])}</i>")
+
+    deadline = task.get("deadline")
+    if deadline:
+        lines.append(f"Дедлайн: {esc(deadline)}")
+    else:
+        lines.append("Дедлайн: не указан")
+
+    lines.append(f"Приоритет: {p_emoji} {esc(p_label)}")
+
+    direction = task.get("direction")
+    if direction:
+        lines.append(f"Направление: {esc(direction)}")
+
+    subtasks = task.get("subtasks") or []
+    if subtasks:
+        lines.append("\nПодзадачи:")
+        for i, st in enumerate(subtasks, 1):
+            lines.append(f"  {i}. {esc(st)}")
+
+    return "\n".join(lines)
+
+
+def create_subtasks(subtask_titles: list[str], column_id: str, parent_id: str) -> None:
+    """Создаёт подзадачи и привязывает к родительской задаче."""
+    if not subtask_titles:
+        return
+    child_ids = []
+    for title in subtask_titles:
+        body = {"title": title[:80], "columnId": column_id}
+        resp = requests.post(f"{YOUGILE_BASE_URL}/tasks", headers=_headers(), json=body)
+        if resp.status_code in (200, 201):
+            child_id = resp.json().get("id")
+            if child_id:
+                child_ids.append(child_id)
+    if child_ids:
+        requests.put(
+            f"{YOUGILE_BASE_URL}/tasks/{parent_id}",
+            headers=_headers(),
+            json={"subtasks": child_ids},
+        )
+
+
 # --- Извлечение задач из текста ---
 def _extraction_prompt(today: str) -> str:
     return (
@@ -869,185 +973,93 @@ async def handle_report_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_add_task_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Отправь:\n"
-        "• <b>Текст</b> — опишу задачу и создам\n"
-        "• <b>Голосовое</b> — распознаю и создам\n"
-        "• <b>Аудиофайл</b> (.mp3/.m4a/.wav) — транскрипт встречи → задачи",
+        "Опиши задачу — текстом или голосом.\n\n"
+        "Можно писать в свободной форме:\n"
+        "<i>«Сделать презентацию для клиента Welcome, дедлайн пятница, важно»</i>\n"
+        "<i>«Купить домен для проекта Альпина, не срочно»</i>\n\n"
+        "Если хочешь создать задачи из транскрипта встречи — пришли аудиофайл (.mp3/.m4a/.wav) или .txt.",
         parse_mode="HTML", reply_markup=MAIN_MENU,
     )
     context.user_data["awaiting_task"] = True
 
 
-# --- Пошаговое создание задачи (inline-кнопки) ---
+# --- AI-разбор и подтверждение одной задачи ---
 
-async def _start_task_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, msg):
-    """Шаг 1: выбор доски (проект → доска)."""
+async def _show_single_task_preview(update, context, task: dict, msg):
+    """Показывает превью задачи и кнопки подтверждения."""
     user_id = update.effective_user.id
-    loop = asyncio.get_event_loop()
-    projects = await loop.run_in_executor(None, get_projects)
-    if not projects:
-        await context.bot.edit_message_text("Нет доступных проектов.", chat_id=update.effective_chat.id, message_id=msg.message_id)
-        return
-
-    # Собираем проекты и их доски
-    boards_list = []
-    for p in projects:
-        boards = await loop.run_in_executor(None, get_boards, p["id"])
-        for b in boards:
-            boards_list.append({"id": b["id"], "title": b["title"], "project": p["title"]})
-
-    if not boards_list:
-        await context.bot.edit_message_text("Нет досок.", chat_id=update.effective_chat.id, message_id=msg.message_id)
-        return
-
-    task_draft[user_id] = {"title": title, "step": "board", "msg_id": msg.message_id}
-
-    # Кнопки досок (группируем по проекту)
-    buttons = []
-    for b in boards_list:
-        label = f"{b['project']} / {b['title']}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"tboard_{b['id']}")])
-    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="tboard_cancel")])
-
+    pending_single_task[user_id] = task
+    preview = format_single_task_preview(task)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Создать", callback_data="stask_confirm"),
+        InlineKeyboardButton("Отмена", callback_data="stask_cancel"),
+    ]])
     await context.bot.edit_message_text(
-        f"<b>{esc(title[:60])}</b>\n\nВыбери доску:",
-        chat_id=update.effective_chat.id, message_id=msg.message_id,
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons),
+        preview,
+        chat_id=update.effective_chat.id,
+        message_id=msg.message_id,
+        parse_mode="HTML",
+        reply_markup=keyboard,
     )
 
 
-async def handle_task_board_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 2: выбор дедлайна."""
+async def handle_single_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Подтверждение или отмена создания одной задачи."""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-    draft = task_draft.get(user_id)
-    if not draft:
-        await query.edit_message_text("Сессия истекла. Начни заново.")
-        return
 
-    if query.data == "tboard_cancel":
-        task_draft.pop(user_id, None)
+    if query.data == "stask_cancel":
+        pending_single_task.pop(user_id, None)
         await query.edit_message_text("Отменено.")
         return
 
-    board_id = query.data.replace("tboard_", "")
-    draft["board_id"] = board_id
-    draft["step"] = "deadline"
-
-    today = date.today()
-    buttons = [
-        [InlineKeyboardButton("Сегодня", callback_data="tdl_0"),
-         InlineKeyboardButton("Завтра", callback_data="tdl_1")],
-        [InlineKeyboardButton("Через 3 дня", callback_data="tdl_3"),
-         InlineKeyboardButton("Через неделю", callback_data="tdl_7")],
-        [InlineKeyboardButton("Без дедлайна", callback_data="tdl_none")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="tdl_cancel")],
-    ]
-
-    await query.edit_message_text(
-        f"<b>{esc(draft['title'][:60])}</b>\n\nДедлайн?",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-async def handle_task_deadline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 3: выбор приоритета."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    draft = task_draft.get(user_id)
-    if not draft:
+    task = pending_single_task.pop(user_id, None)
+    if not task:
         await query.edit_message_text("Сессия истекла. Начни заново.")
         return
-
-    if query.data == "tdl_cancel":
-        task_draft.pop(user_id, None)
-        await query.edit_message_text("Отменено.")
-        return
-
-    # Сохраняем дедлайн
-    if query.data != "tdl_none":
-        days_offset = int(query.data.replace("tdl_", ""))
-        dl_date = date.today() + timedelta(days=days_offset)
-        draft["deadline"] = dl_date.strftime("%Y-%m-%d")
-        draft["deadline_label"] = dl_date.strftime("%d.%m.%Y")
-    else:
-        draft["deadline"] = None
-        draft["deadline_label"] = "без дедлайна"
-
-    draft["step"] = "priority"
-
-    buttons = [
-        [InlineKeyboardButton("🔴 Высокий", callback_data="tprio_High"),
-         InlineKeyboardButton("🟡 Средний", callback_data="tprio_Medium")],
-        [InlineKeyboardButton("🟢 Низкий", callback_data="tprio_Low"),
-         InlineKeyboardButton("⚪ Без приоритета", callback_data="tprio_none")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="tprio_cancel")],
-    ]
-
-    await query.edit_message_text(
-        f"<b>{esc(draft['title'][:60])}</b>\n\nПриоритет?",
-        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-async def handle_task_priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Шаг 4: создание задачи в колонке 'Надо сделать'."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    draft = task_draft.pop(user_id, None)
-    if not draft:
-        await query.edit_message_text("Сессия истекла. Начни заново.")
-        return
-
-    if query.data == "tprio_cancel":
-        await query.edit_message_text("Отменено.")
-        return
-
-    # Приоритет
-    priority_key = query.data.replace("tprio_", "")
-    priority = priority_key if priority_key in PRIORITY_STATES else None
-    p_label = {"High": "🔴 Высокий", "Medium": "🟡 Средний", "Low": "🟢 Низкий"}.get(priority, "⚪ Без")
 
     await query.edit_message_text("Создаю задачу...")
-
-    # Находим колонку "Надо сделать"
     loop = asyncio.get_event_loop()
-    columns = await loop.run_in_executor(None, get_columns_by_board, draft["board_id"])
-    column_id = None
-    for col in columns:
-        if col.get("title") == "Надо сделать":
-            column_id = col["id"]
-            break
-    if not column_id and columns:
-        column_id = columns[0]["id"]
+    column_id = await loop.run_in_executor(None, find_column_id, ["Надо сделать"])
     if not column_id:
         await query.edit_message_text("Колонка 'Надо сделать' не найдена.")
         return
 
-    task_data = {"title": draft["title"], "description": ""}
-    if priority:
-        task_data["priority"] = priority
-    if draft.get("deadline"):
-        task_data["deadline"] = draft["deadline"]
-
-    ok, data = await loop.run_in_executor(None, create_yougile_task, task_data, column_id)
-    if ok:
-        tid = data.get("id", "")
-        key = data.get("idTaskProject") or data.get("key") or ""
-        key_str = f" <code>{esc(key)}</code>" if key else ""
-        dl_label = draft.get("deadline_label", "без дедлайна")
-        dl_info = f"\n📅 {dl_label}" if draft.get("deadline") else ""
-        await query.edit_message_text(
-            f"✅ Создана!{key_str}\n<b>{esc(draft['title'][:80])}</b>"
-            f"\n{p_label}{dl_info}"
-            f"\n🔗 <a href=\"{task_url(tid)}\">Открыть</a>",
-            parse_mode="HTML", disable_web_page_preview=True,
-        )
-    else:
+    ok, data = await loop.run_in_executor(None, create_yougile_task, task, column_id)
+    if not ok:
         await query.edit_message_text(f"Ошибка: {esc(data)}")
+        return
+
+    tid = data.get("id", "")
+    key = data.get("idTaskProject") or data.get("key") or ""
+    key_str = f" <code>{esc(key)}</code>" if key else ""
+
+    # Создаём подзадачи
+    subtasks = task.get("subtasks") or []
+    if subtasks and tid:
+        await loop.run_in_executor(None, create_subtasks, subtasks, column_id, tid)
+
+    # Формируем итог
+    priority = task.get("priority", "Medium")
+    p_emoji = PRIORITY_EMOJI.get(priority, "")
+    priority_labels = {"High": "Важно", "Medium": "Нормально", "Low": "Не важно"}
+    p_label = f"{p_emoji} {priority_labels.get(priority, priority)}"
+
+    dl = task.get("deadline")
+    dl_line = f"\nДедлайн: {esc(dl)}" if dl else ""
+
+    direction = task.get("direction")
+    dir_line = f"\nНаправление: {esc(direction)}" if direction else ""
+
+    sub_line = f"\nПодзадач создано: {len(subtasks)}" if subtasks else ""
+
+    await query.edit_message_text(
+        f"Создана!{key_str}\n<b>{esc(task['title'][:80])}</b>"
+        f"\nПриоритет: {p_label}{dl_line}{dir_line}{sub_line}"
+        f"\n<a href=\"{task_url(tid)}\">Открыть в YouGile</a>",
+        parse_mode="HTML", disable_web_page_preview=True,
+    )
 
 
 async def prioritize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1162,42 +1174,28 @@ async def chat_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Чат сброшен.", reply_markup=MAIN_MENU)
 
 
-# --- Голосовое → задача ---
+# --- Голосовое → задача (с полным AI-разбором) ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Голосовое используется для создания одной задачи только если ожидается задача,
+    # либо всегда (удобнее — всегда разбираем как задачу)
     msg = await update.message.reply_text("Распознаю голосовое...")
     voice_path = "voice.ogg"
     try:
         voice_file = await update.message.voice.get_file()
         await voice_file.download_to_drive(voice_path)
-        prompt = 'Распознай речь. Верни JSON: {"title": "краткий заголовок задачи", "description": "описание"}'
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(None, ai_audio, voice_path, prompt)
-        try:
-            task_info = json.loads(_clean_json(raw))
-            title = task_info.get("title", "Голосовая задача")
-            description = task_info.get("description", "")
-        except Exception:
-            title, description = "Голосовая задача", raw
-
-        column_id = await loop.run_in_executor(None, find_column_id)
-        if not column_id:
-            await context.bot.edit_message_text("Колонка не найдена.", chat_id=update.effective_chat.id, message_id=msg.message_id)
-            return
-        ok, data = await loop.run_in_executor(None, create_yougile_task,
-            {"title": title, "description": description, "priority": "Medium"}, column_id)
-        if ok:
-            task_id = data.get("id", "")
-            key = data.get("idTaskProject") or data.get("key") or ""
-            key_str = f" <code>{esc(key)}</code>" if key else ""
-            await context.bot.edit_message_text(
-                f"✅ Задача создана!{key_str}\n<b>{esc(title)}</b>\n🔗 <a href=\"{task_url(task_id)}\">Открыть</a>",
-                chat_id=update.effective_chat.id, message_id=msg.message_id,
-                parse_mode="HTML", disable_web_page_preview=True,
-            )
-        else:
-            await context.bot.edit_message_text(f"Ошибка: {esc(data)}", chat_id=update.effective_chat.id, message_id=msg.message_id)
+        task = await loop.run_in_executor(None, parse_single_task_from_audio, voice_path)
+        context.user_data.pop("awaiting_task", None)
+        await _show_single_task_preview(update, context, task, msg)
+    except json.JSONDecodeError:
+        await context.bot.edit_message_text(
+            "AI вернул невалидный JSON. Попробуй ещё раз.",
+            chat_id=update.effective_chat.id, message_id=msg.message_id,
+        )
     except Exception as e:
-        await context.bot.edit_message_text(f"Ошибка: {esc(e)}", chat_id=update.effective_chat.id, message_id=msg.message_id)
+        await context.bot.edit_message_text(
+            f"Ошибка: {esc(e)}", chat_id=update.effective_chat.id, message_id=msg.message_id,
+        )
     finally:
         if os.path.exists(voice_path):
             os.remove(voice_path)
@@ -1348,18 +1346,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # Если ожидаем задачу (после нажатия ➕) — обрабатываем как задачу
+    # Если ожидаем задачу (после нажатия ➕) — разбираем через AI
     if context.user_data.get("awaiting_task"):
         context.user_data.pop("awaiting_task", None)
-        if len(text) < 200:
-            # Пошаговый flow: выбор доски → дедлайн → создание
-            msg = await update.message.reply_text("Загружаю доски...")
-            try:
-                await _start_task_flow(update, context, text[:80], msg)
-            except Exception as e:
-                await context.bot.edit_message_text(f"Ошибка: {esc(e)}", chat_id=update.effective_chat.id, message_id=msg.message_id)
-        else:
-            await _process_transcript(update, context, text)
+        msg = await update.message.reply_text("Разбираю задачу...")
+        try:
+            loop = asyncio.get_event_loop()
+            task = await loop.run_in_executor(None, parse_single_task, text)
+            await _show_single_task_preview(update, context, task, msg)
+        except json.JSONDecodeError:
+            await context.bot.edit_message_text(
+                "AI вернул невалидный JSON. Попробуй переформулировать.",
+                chat_id=update.effective_chat.id, message_id=msg.message_id,
+            )
+        except Exception as e:
+            await context.bot.edit_message_text(
+                f"Ошибка: {esc(e)}", chat_id=update.effective_chat.id, message_id=msg.message_id,
+            )
         return
 
     # Обычный чат
@@ -1403,10 +1406,8 @@ if __name__ == "__main__":
     ))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_txt_file))
 
-    # Callbacks — пошаговое создание задачи
-    app.add_handler(CallbackQueryHandler(handle_task_board_callback, pattern="^tboard_"))
-    app.add_handler(CallbackQueryHandler(handle_task_deadline_callback, pattern="^tdl_"))
-    app.add_handler(CallbackQueryHandler(handle_task_priority_callback, pattern="^tprio_"))
+    # Callbacks — создание одной задачи (подтверждение/отмена)
+    app.add_handler(CallbackQueryHandler(handle_single_task_callback, pattern="^stask_"))
     # Callbacks — отчёты
     app.add_handler(CallbackQueryHandler(handle_report_type_callback, pattern="^rtype_"))
     app.add_handler(CallbackQueryHandler(handle_report_callback, pattern="^report_"))
