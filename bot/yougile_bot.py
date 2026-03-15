@@ -596,11 +596,14 @@ def parse_single_task(text: str) -> dict:
 
 
 def parse_single_task_from_audio(file_path: str) -> dict:
-    """Разбирает голосовое сообщение в структуру одной задачи через AI."""
-    today = date.today().strftime("%Y-%m-%d")
-    prompt = _task_parse_prompt(today) + "\n\nПрослушай запись и извлеки задачу."
-    raw = ai_audio(file_path, prompt)
-    return json.loads(_clean_json(raw))
+    """Разбирает голосовое сообщение: транскрипция → парсинг текста."""
+    # Шаг 1: транскрибируем аудио
+    transcript = ai_audio(file_path, "Транскрибируй это голосовое сообщение дословно на русском. Верни только текст, без пояснений.")
+    if not transcript or not transcript.strip():
+        raise ValueError("Не удалось распознать голос")
+    logger.info("Voice transcript: %s", transcript[:200])
+    # Шаг 2: парсим текст как обычную задачу
+    return parse_single_task(transcript.strip())
 
 
 def format_single_task_preview(task: dict) -> str:
@@ -637,19 +640,22 @@ def format_single_task_preview(task: dict) -> str:
     return "\n".join(lines)
 
 
-def create_subtasks(subtask_titles: list[str], column_id: str, parent_id: str) -> None:
+def create_subtasks(subtask_titles: list[str], column_id: str, parent_id: str, stickers: dict | None = None) -> None:
     """Создаёт подзадачи и привязывает к родительской задаче."""
     if not subtask_titles:
         return
     child_ids = []
     for title in subtask_titles:
         body = {"title": title[:80], "columnId": column_id}
+        if stickers:
+            body["stickers"] = stickers
         resp = requests.post(f"{YOUGILE_BASE_URL}/tasks", headers=_headers(), json=body)
         if resp.status_code in (200, 201):
             child_id = resp.json().get("id")
             if child_id:
                 child_ids.append(child_id)
     if child_ids:
+        # Привязываем подзадачи к родителю — после этого они пропадут из колонки
         requests.put(
             f"{YOUGILE_BASE_URL}/tasks/{parent_id}",
             headers=_headers(),
@@ -678,10 +684,10 @@ def extract_tasks_from_text(text: str) -> list[dict]:
 
 
 def extract_tasks_from_audio_sync(file_path: str) -> list[dict]:
-    today = date.today().strftime("%Y-%m-%d")
-    prompt = _extraction_prompt(today) + "\n\nПрослушай запись и извлеки задачи."
-    raw = ai_audio(file_path, prompt)
-    return json.loads(_clean_json(raw))
+    transcript = ai_audio(file_path, "Транскрибируй это голосовое сообщение дословно на русском. Верни только текст, без пояснений.")
+    if not transcript or not transcript.strip():
+        raise ValueError("Не удалось распознать голос")
+    return extract_tasks_from_text(transcript.strip())
 
 
 def format_tasks_preview(tasks: list[dict]) -> str:
@@ -1005,7 +1011,12 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
     # Создаём подзадачи
     subtasks = task.get("subtasks") or []
     if subtasks and tid:
-        await loop.run_in_executor(None, create_subtasks, subtasks, column_id, tid)
+        # Наследуем стикеры направления и приоритета
+        sub_stickers = {}
+        direction = task.get("direction")
+        if direction and direction in DIRECTION_STATES:
+            sub_stickers[STICKER_DIRECTION_ID] = DIRECTION_STATES[direction]
+        await loop.run_in_executor(None, create_subtasks, subtasks, column_id, tid, sub_stickers or None)
 
     # Формируем итог
     priority = task.get("priority", "Medium")
