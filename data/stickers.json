@@ -1,0 +1,354 @@
+{
+  "paging": {
+    "count": 23,
+    "limit": 50,
+    "offset": 0,
+    "next": false
+  },
+  "content": [
+    {
+      "id": "b0435d49-0237-47f7-88d6-c10de7adbc9d",
+      "name": "Приоритет",
+      "deleted": null,
+      "icon": "prio",
+      "states": [
+        {
+          "id": "8ced62e1d595",
+          "name": "Важно",
+          "color": "#D92400"
+        },
+        {
+          "id": "55e6b0a1cb68",
+          "name": "Нормально",
+          "color": "#8CC2FF"
+        },
+        {
+          "id": "414cda413f0a",
+          "name": "Не важно",
+          "color": ""
+        }
+      ]
+    },
+    {
+      "id": "fb20e186-822c-400a-8f3c-7ce40bd1e3f8",
+      "name": "Траты на желания",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "94f1c2103c24",
+          "name": "Траты на желания",
+          "color": "#79CE69"
+        }
+      ]
+    },
+    {
+      "id": "e01f6057-4b3c-42e5-aa31-8855647b0b2e",
+      "name": "Инвестиции в знания и оптимизацию",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "05592149bb43",
+          "name": "Инвестиции в знания и оптимизацию",
+          "color": "#F5C24D"
+        }
+      ]
+    },
+    {
+      "id": "b52200c5-f0b0-4622-82ea-645dc91e60a9",
+      "name": "Инвестиции в энергию",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "f2dea9ea024a",
+          "name": "Инвестиции в энергию",
+          "color": "#F5C24D"
+        }
+      ]
+    },
+    {
+      "id": "9225d084-b971-499e-8c05-0d618e4a71a2",
+      "name": "Инвестиции в деньги",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "e23d613cf000",
+          "name": "Инвестиции в деньги",
+          "color": "#D92400"
+        }
+      ]
+    },
+    {
+      "id": "fb5fa566-0403-4e0f-90ce-262ca5ae5afe",
+      "name": "Инвестиции в славу",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "05a3b4390881",
+          "name": "Инвестиции в славу",
+          "color": "#CA79DB"
+        }
+      ]
+    },
+    {
+      "id": "ee713da6-4b56-4c38-82c1-913ee56afa51",
+      "name": "Инвестиции во власть",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "83d21d4f6cab",
+          "name": "Инвестиции во власть",
+          "color": "#8CC2FF"
+        }
+      ]
+    },
+    {
+      "id": "e00ebe58-fb5b-45bb-9935-3974e342820b",
+      "name": "Инвестиции в связи",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "098cbc53f0e4",
+          "name": "Инвестиции в связи",
+          "color": "#8CC2FF"
+        }
+      ]
+    },
+    {
+      "id": "7d6b52aa-a2ab-45e2-a31e-2d0d7200dae1",
+      "name": "Траты на пользу природы",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "0e12e904d06d",
+          "name": "Траты на пользу природы",
+          "color": "#79CE69"
+        }
+      ]
+    },
+    {
+      "id": "516714e3-9ad0-40ac-b15b-3495c949e016",
+      "name": "Траты на пользу обществу",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "6ecef644ed40",
+          "name": "Траты на пользу обществу",
+          "color": "#FF8C8C"
+        }
+      ]
+    },
+    {
+      "id": "39f006ff-672b-4ab0-9700-337c0e4891d0",
+      "name": "green",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "3636dd4d8df2",
+          "name": "‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎",
+          "color": "#79CE69"
+        }
+      ]
+    },
+    {
+      "id": "6cef4014-3dd8-4950-b004-e340407c71e3",
+      "name": "Курс",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "c9590104b375",
+          "name": "Курс",
+          "color": "#F5C24D"
+        }
+      ]
+    },
+    {
+      "id": "00890583-ff5e-4a20-a90c-3df5007ba4e0",
+      "name": "Реклама",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "6ecba6b0b207",
+          "name": "Реклама",
+          "color": "#8CC2FF"
+        }
+      ]
+    },
+    {
+      "id": "cb82b201-218c-40dd-a144-b74c5cd2b80a",
+      "name": "Сайт",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "c61dcbb95678",
+          "name": "Сайт",
+          "color": "#79CE69"
+        }
+      ]
+    },
+    {
+      "id": "d4daee10-1f97-4009-879f-cd3042e20365",
+      "name": "Соцсети и медиа",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "4d34bb15ad6d",
+          "name": "Соцсети и медиа",
+          "color": "#FF8C8C"
+        }
+      ]
+    },
+    {
+      "id": "0643adea-031f-4b14-a032-263c74447e64",
+      "name": "В работе",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "321e08eec885",
+          "name": "В работе",
+          "color": "#2BDBCC"
+        }
+      ]
+    },
+    {
+      "id": "15a759ed-20f9-4d4b-abd4-9da931a5d297",
+      "name": "Завершено",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "f81608e9ae1b",
+          "name": "Завершено",
+          "color": "#79CE69"
+        }
+      ]
+    },
+    {
+      "id": "86d2df7f-aaae-4938-90dd-d436515067d1",
+      "name": "обсуждение",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "a0eb52fa8a02",
+          "name": "обсуждение",
+          "color": "#F5C24D"
+        }
+      ]
+    },
+    {
+      "id": "f3b73721-9923-46d6-8fb8-f48e2085d2cd",
+      "name": "Не выполнено",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "e25b4e3acc86",
+          "name": "Не выполнено",
+          "color": "#D92400"
+        }
+      ]
+    },
+    {
+      "id": "b53f657e-0991-4fa3-b63d-e228aff7cc49",
+      "name": "orange",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "95c07e10d265",
+          "name": "‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎",
+          "color": "#F5C24D"
+        }
+      ]
+    },
+    {
+      "id": "3a83ece8-dc35-40d5-b830-2210e5957a10",
+      "name": "purple",
+      "deleted": null,
+      "icon": "",
+      "states": [
+        {
+          "id": "70c2ae0684f4",
+          "name": "‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎‏‏‎ ‎",
+          "color": "#CA79DB"
+        }
+      ]
+    },
+    {
+      "id": "54176f3d-77ff-4eb9-a70c-70caa96910e3",
+      "name": "Направление",
+      "deleted": null,
+      "icon": "box",
+      "states": [
+        {
+          "id": "8d4f534aec91",
+          "name": "Альпина",
+          "color": "#2BDBCC"
+        },
+        {
+          "id": "2a1cba107dfd",
+          "name": "Welcome",
+          "color": "#79CE69"
+        },
+        {
+          "id": "413cd49fb4c4",
+          "name": "Личное",
+          "color": "#CA79DB"
+        },
+        {
+          "id": "00db86f5a160",
+          "name": "Агентство",
+          "color": "#2BDBCC"
+        }
+      ]
+    },
+    {
+      "id": "ed4619b0-b061-405b-9cf5-30864717985f",
+      "name": "Сайт (2)",
+      "deleted": null,
+      "icon": "plus",
+      "states": [
+        {
+          "id": "56e68df39d5b",
+          "name": "Аналитика",
+          "color": "#CA79DB"
+        },
+        {
+          "id": "030e250b71bd",
+          "name": "Сайт",
+          "color": "#CA79DB"
+        },
+        {
+          "id": "114faafe6fa0",
+          "name": "Планы",
+          "color": "#CA79DB"
+        },
+        {
+          "id": "4fb04485f086",
+          "name": "Блог",
+          "color": "#CA79DB"
+        },
+        {
+          "id": "24b68cd70600",
+          "name": "Трафик",
+          "color": "#CA79DB"
+        }
+      ]
+    }
+  ]
+}
