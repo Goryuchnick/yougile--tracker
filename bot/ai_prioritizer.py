@@ -12,8 +12,9 @@ YOUGILE_API_KEY    = os.environ.get("YOUGILE_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 MODELS = [
-    "google/gemini-3.1-flash-lite-preview",   # $0.25/M — для классификации хватит
-    "google/gemini-3-flash-preview",           # $0.50/M — fallback
+    "qwen/qwen2.5-7b-instruct",                # компактная для короткой классификации
+    "mistralai/mistral-nemo",                  # дешёвый fallback
+    "google/gemini-3.1-flash-lite-preview",    # надёжный fallback
 ]
 
 STICKER_PRIORITY_ID = "b0435d49-0237-47f7-88d6-c10de7adbc9d"

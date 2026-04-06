@@ -32,13 +32,16 @@ MODELS_CHAT = [
 ]
 # Задачи: умная модель для JSON-парсинга и отчётов
 MODELS_TASK = [
-    "google/gemini-3-flash-preview",          # $0.50/M — отличный JSON, быстрый
-    "google/gemini-3.1-flash-lite-preview",   # $0.25/M — fallback
+    "qwen/qwen2.5-14b-instruct",              # компактная модель для JSON/задач
+    "qwen/qwen2.5-7b-instruct",               # дешёвый fallback
+    "mistralai/mistral-nemo",                 # fallback для простых структур
+    "google/gemini-3-flash-preview",          # надёжный fallback
 ]
 # Анализ: саммари/рекомендации
 MODELS_ANALYSIS = [
-    "google/gemini-3.1-flash-lite-preview",   # $0.25/M — хватит для текста
-    "mistralai/mistral-nemo",                 # $0.02/M — fallback
+    "qwen/qwen2.5-7b-instruct",               # компактный анализ
+    "mistralai/mistral-nemo",                 # дешёвый fallback
+    "google/gemini-3.1-flash-lite-preview",   # надёжный fallback
 ]
 # Аудио: транскрипция голоса
 MODELS_AUDIO = [
@@ -67,6 +70,7 @@ DIRECTION_STATES = {
 # Проект и доска
 TARGET_PROJECT = "Продуктивность"
 TARGET_BOARD   = "Задачи лог"
+EVENT_LOG_API_URL = os.environ.get("EVENT_LOG_API_URL", "").rstrip("/")
 
 # Колонки, которые считаются «активными» (задачи требуют действий)
 ACTIVE_COLUMNS = ["Надо сделать", "В работе", "На согласовании"]
@@ -90,7 +94,8 @@ chat_history:    dict[int, list[dict]] = {}
 chat_history_ts: dict[int, float] = {}  # timestamp последнего сообщения (для TTL 2 ч)
 task_draft:    dict[int, dict] = {}   # user_id -> {title, description, step, board_id, ...}
 pending_single_task: dict[int, dict] = {}  # user_id -> разобранная одна задача
-pending_report: dict[int, dict] = {}       # user_id -> {"days": int}
+pending_report: dict[int, dict] = {}       # user_id -> параметры периода/направления
+llm_json_metrics = {"ok": 0, "repair": 0, "fail": 0}
 
 # Mini App URL
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://yougile-webhook.147.45.184.108.sslip.io/app")
@@ -222,6 +227,69 @@ def _clean_json(raw: str) -> str:
     return raw.strip()
 
 
+def ai_generate_json(prompt: str, expected: str = "object"):
+    """JSON-вызов с repair-pass для компактных моделей."""
+    try:
+        raw = ai_generate(prompt)
+        data = json.loads(_clean_json(raw))
+        llm_json_metrics["ok"] += 1
+        return data
+    except Exception:
+        repair_prompt = (
+            f"Исправь JSON-ответ. Верни только валидный JSON ({expected}), без пояснений и markdown.\n\n"
+            f"Исходный ответ:\n{raw if 'raw' in locals() else ''}"
+        )
+        repaired = ai_generate(repair_prompt)
+        try:
+            data = json.loads(_clean_json(repaired))
+            llm_json_metrics["repair"] += 1
+            return data
+        except Exception:
+            llm_json_metrics["fail"] += 1
+            raise
+
+
+def _safe_callback_token(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", text.lower())[:20] or "x"
+
+
+def _task_context(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> dict:
+    drafts = context.user_data.setdefault("task_drafts", {})
+    return drafts.setdefault(user_id, {})
+
+
+def _clear_task_context(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    drafts = context.user_data.get("task_drafts", {})
+    drafts.pop(user_id, None)
+    context.user_data.pop("awaiting_task", None)
+    context.user_data.pop("editing_single_task_field", None)
+
+
+def _normalize_task(task: dict, fallback_direction: str | None = None) -> dict:
+    task["title"] = (task.get("title") or "Без названия").strip()[:80]
+    task["description"] = (task.get("description") or "").strip()
+    task["priority"] = task.get("priority") if task.get("priority") in PRIORITY_STATES else "Medium"
+    if fallback_direction and fallback_direction in DIRECTION_STATES:
+        task["direction"] = fallback_direction
+    elif task.get("direction") not in DIRECTION_STATES:
+        task["direction"] = None
+    task["subtasks"] = [str(x).strip() for x in (task.get("subtasks") or []) if str(x).strip()]
+    task["checklist"] = [str(x).strip() for x in (task.get("checklist") or []) if str(x).strip()]
+    if task.get("steps_mode") not in ("subtasks", "checklist"):
+        task["steps_mode"] = "subtasks" if task["subtasks"] else "checklist"
+    return task
+
+
+def _ensure_steps_mode(task: dict) -> None:
+    mode = task.get("steps_mode", "subtasks")
+    if mode == "subtasks":
+        if not task.get("subtasks") and task.get("checklist"):
+            task["subtasks"] = list(task["checklist"])
+    else:
+        if not task.get("checklist") and task.get("subtasks"):
+            task["checklist"] = list(task["subtasks"])
+
+
 # --- YouGile API ---
 def _headers():
     return {"Authorization": f"Bearer {YOUGILE_API_KEY}", "Content-Type": "application/json"}
@@ -308,10 +376,10 @@ def resolve_user_name(user_id: str) -> str:
     return users.get(user_id, "")
 
 
-def find_column_id(target_columns=None) -> str | None:
+def find_column_id(target_columns=None, board_id: str | None = None) -> str | None:
     if target_columns is None:
         target_columns = ["Входящие", "Надо сделать", "Бэклог"]
-    columns = get_columns()
+    columns = get_columns_by_board(board_id) if board_id else get_columns()
     for col in columns:
         if col.get("title") in target_columns:
             return col["id"]
@@ -582,7 +650,8 @@ def _task_parse_prompt(today: str) -> str:
         f'- "priority": "High" (важно/срочно), "Medium" (нормально/обычно), "Low" (не срочно/не важно). '
         f'Если не указано — "Medium"\n'
         f'- "direction": одно из [{directions}] или null. Определяй по названиям проектов/контексту\n'
-        f'- "subtasks": массив строк — подзадачи/шаги (если перечислены), иначе []\n\n'
+        f'- "subtasks": массив строк — подзадачи (если перечислены), иначе []\n'
+        f'- "checklist": массив строк — чеклист-шаги (если перечислены), иначе []\n\n'
         f"Верни только JSON-объект без пояснений."
     )
 
@@ -591,8 +660,7 @@ def parse_single_task(text: str) -> dict:
     """Разбирает свободный текст в структуру одной задачи через AI."""
     today = date.today().strftime("%Y-%m-%d")
     prompt = _task_parse_prompt(today) + f"\n\nОписание задачи:\n{text}"
-    raw = ai_generate(prompt)
-    return json.loads(_clean_json(raw))
+    return ai_generate_json(prompt, expected="object")
 
 
 def parse_single_task_from_audio(file_path: str) -> dict:
@@ -630,20 +698,32 @@ def format_single_task_preview(task: dict) -> str:
     direction = task.get("direction")
     if direction:
         lines.append(f"Направление: {esc(direction)}")
+    if task.get("board_title"):
+        lines.append(f"Доска: {esc(task['board_title'])}")
+    if task.get("column_title"):
+        lines.append(f"Колонка: {esc(task['column_title'])}")
 
     subtasks = task.get("subtasks") or []
-    if subtasks:
+    checklist = task.get("checklist") or []
+    mode = task.get("steps_mode", "subtasks")
+    if mode == "subtasks" and subtasks:
         lines.append("\nПодзадачи:")
         for i, st in enumerate(subtasks, 1):
+            lines.append(f"  {i}. {esc(st)}")
+    elif mode == "checklist" and checklist:
+        lines.append("\nЧеклист:")
+        for i, st in enumerate(checklist, 1):
             lines.append(f"  {i}. {esc(st)}")
 
     return "\n".join(lines)
 
 
-def create_subtasks(subtask_titles: list[str], column_id: str, parent_id: str, stickers: dict | None = None) -> None:
-    """Создаёт подзадачи и привязывает к родительской задаче."""
+def create_subtasks(subtask_titles: list[str], column_id: str, parent_id: str, stickers: dict | None = None) -> tuple[bool, list[str]]:
+    """Создаёт подзадачи и привязывает к родительской задаче.
+    Возвращает (успех_линка, child_ids).
+    """
     if not subtask_titles:
-        return
+        return True, []
     child_ids = []
     for title in subtask_titles:
         body = {"title": title[:80], "columnId": column_id}
@@ -656,11 +736,32 @@ def create_subtasks(subtask_titles: list[str], column_id: str, parent_id: str, s
                 child_ids.append(child_id)
     if child_ids:
         # Привязываем подзадачи к родителю — после этого они пропадут из колонки
-        requests.put(
+        link_resp = requests.put(
             f"{YOUGILE_BASE_URL}/tasks/{parent_id}",
             headers=_headers(),
             json={"subtasks": child_ids},
         )
+        if link_resp.status_code not in (200, 201):
+            return False, child_ids
+        verify_resp = requests.get(f"{YOUGILE_BASE_URL}/tasks/{parent_id}", headers=_headers())
+        if verify_resp.status_code != 200:
+            return False, child_ids
+        linked_ids = set(verify_resp.json().get("subtasks") or [])
+        return set(child_ids).issubset(linked_ids), child_ids
+    return True, []
+
+
+def add_checklist_to_task(task_id: str, items: list[str]) -> bool:
+    if not items:
+        return True
+    payload = {
+        "checklists": [{
+            "title": "Чеклист",
+            "items": [{"title": t[:120], "isCompleted": False} for t in items],
+        }]
+    }
+    resp = requests.put(f"{YOUGILE_BASE_URL}/tasks/{task_id}", headers=_headers(), json=payload)
+    return resp.status_code in (200, 201)
 
 
 # --- Извлечение задач из текста ---
@@ -672,6 +773,7 @@ def _extraction_prompt(today: str) -> str:
         f'- "assignee" — кто отвечает (или "не назначен")\n'
         f'- "deadline" — YYYY-MM-DD или null\n'
         f'- "priority" — High/Medium/Low\n'
+        f'- "subtasks" — подзадачи (массив строк) или []\n'
         f'- "checklist" — подшаги (массив строк) или []\n\n'
         f"Дата: {today}. Верни только JSON массив."
     )
@@ -679,8 +781,7 @@ def _extraction_prompt(today: str) -> str:
 
 def extract_tasks_from_text(text: str) -> list[dict]:
     today = date.today().strftime("%Y-%m-%d")
-    raw = ai_generate(_extraction_prompt(today) + f"\n\nТекст:\n{text}")
-    return json.loads(_clean_json(raw))
+    return ai_generate_json(_extraction_prompt(today) + f"\n\nТекст:\n{text}", expected="array")
 
 
 def extract_tasks_from_audio_sync(file_path: str) -> list[dict]:
@@ -697,8 +798,12 @@ def format_tasks_preview(tasks: list[dict]) -> str:
         assignee = esc(t.get("assignee") or "—")
         emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(t.get("priority", "Medium"), "⚪")
         lines.append(f"{i}. {emoji} <b>{esc(t['title'])}</b>\n   👤 {assignee} | 📅 {deadline}")
-        if t.get("checklist"):
-            lines.append(f"   ✅ {len(t['checklist'])} подшагов")
+        subtasks = t.get("subtasks") or []
+        checklist = t.get("checklist") or []
+        if subtasks:
+            lines.append(f"   🧩 {len(subtasks)} подзадач")
+        if checklist:
+            lines.append(f"   ✅ {len(checklist)} подшагов")
     return "\n".join(lines)
 
 
@@ -752,105 +857,344 @@ async def handle_active_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
 
+def _build_direction_keyboard(prefix: str = "sdir_", include_all: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("Альпина", callback_data=f"{prefix}alpina"),
+            InlineKeyboardButton("Welcome", callback_data=f"{prefix}welcome"),
+        ],
+        [
+            InlineKeyboardButton("Личное", callback_data=f"{prefix}personal"),
+            InlineKeyboardButton("Агентство", callback_data=f"{prefix}agency"),
+        ],
+    ]
+    if include_all:
+        rows.append([InlineKeyboardButton("Все направления", callback_data=f"{prefix}all")])
+    return InlineKeyboardMarkup(rows)
+
+
+DIRECTION_CALLBACK_MAP = {
+    "alpina": "Альпина",
+    "welcome": "Welcome",
+    "personal": "Личное",
+    "agency": "Агентство",
+}
+
+
+def _period_from_text(text: str) -> tuple[int, int, str] | None:
+    text = text.strip()
+    iso_match = re.search(r"(\d{4}-\d{2}-\d{2})\s*[-\s]\s*(\d{4}-\d{2}-\d{2})", text)
+    ru_match = re.search(r"(\d{2}\.\d{2}\.\d{4})\s*[-\s]\s*(\d{2}\.\d{2}\.\d{4})", text)
+    try:
+        if iso_match:
+            d1 = datetime.strptime(iso_match.group(1), "%Y-%m-%d").date()
+            d2 = datetime.strptime(iso_match.group(2), "%Y-%m-%d").date()
+        elif ru_match:
+            d1 = datetime.strptime(ru_match.group(1), "%d.%m.%Y").date()
+            d2 = datetime.strptime(ru_match.group(2), "%d.%m.%Y").date()
+        else:
+            return None
+    except ValueError:
+        return None
+    if d2 < d1:
+        d1, d2 = d2, d1
+    ts_from = int(datetime.combine(d1, datetime.min.time()).timestamp() * 1000)
+    ts_to = int((datetime.combine(d2, datetime.max.time())).timestamp() * 1000)
+    label = f"{d1.strftime('%d.%m.%Y')} - {d2.strftime('%d.%m.%Y')}"
+    return ts_from, ts_to, label
+
+
+def _event_log_summary(ts_from: int, ts_to: int, direction: str | None) -> tuple[list[str], bool]:
+    if not EVENT_LOG_API_URL:
+        return [], False
+    try:
+        days = max(1, int((ts_to - ts_from) / (1000 * 60 * 60 * 24)) + 1)
+        resp = requests.get(f"{EVENT_LOG_API_URL}/events", params={"days": days, "limit": 500}, timeout=15)
+        if resp.status_code != 200:
+            return [], False
+        events = resp.json().get("events", [])
+    except Exception:
+        return [], False
+
+    lines = []
+    task_dir_cache: dict[str, bool] = {}
+    for ev in events:
+        ts = ev.get("timestamp") or 0
+        if ts < ts_from or ts > ts_to:
+            continue
+        object_id = ev.get("object_id") or ""
+        if direction:
+            if object_id not in task_dir_cache:
+                tr = requests.get(f"{YOUGILE_BASE_URL}/tasks/{object_id}", headers=_headers())
+                if tr.status_code == 200:
+                    stickers = tr.json().get("stickers") or {}
+                    task_dir_cache[object_id] = stickers.get(STICKER_DIRECTION_ID) == DIRECTION_STATES.get(direction)
+                else:
+                    task_dir_cache[object_id] = False
+            if not task_dir_cache.get(object_id):
+                continue
+        ev_type = ev.get("event_type") or "event"
+        dt = datetime.fromtimestamp(ts / 1000).strftime("%d.%m %H:%M")
+        lines.append(f"- [{dt}] {ev_type} task={object_id[:8]}")
+    return lines[:120], len(lines) >= 5
+
+
+def collect_work_summary_range(ts_from: int, ts_to: int, direction: str | None = None) -> str:
+    """Live API сводка по диапазону: завершения, движения, комментарии, прогресс."""
+    columns = get_columns()
+    if not columns:
+        return "Нет данных по колонкам."
+    active_set = set(ACTIVE_COLUMNS)
+    done_lines: list[str] = []
+    move_lines: list[str] = []
+    comm_lines: list[str] = []
+    progress_lines: list[str] = []
+
+    for col in columns:
+        tasks = get_column_tasks(col["id"], limit=200)
+        for t in tasks:
+            stickers = t.get("stickers") or {}
+            if direction and stickers.get(STICKER_DIRECTION_ID) != DIRECTION_STATES.get(direction):
+                continue
+            task_id = t.get("id", "")
+            title = t.get("title", "")[:80]
+            if not task_id or not title:
+                continue
+
+            if t.get("completed"):
+                ct = t.get("completedTimestamp") or t.get("timestamp", 0)
+                if ts_from <= ct <= ts_to:
+                    done_lines.append(f"- {title}")
+
+            # Оставляем только задачи с фактической активностью в периоде.
+            if col.get("title") not in active_set:
+                continue
+            try:
+                cr = requests.get(
+                    f"{YOUGILE_BASE_URL}/chats/{task_id}/messages",
+                    headers=_headers(),
+                    params={"since": ts_from, "limit": 100, "includeSystem": "true"},
+                    timeout=15,
+                )
+                if cr.status_code != 200:
+                    continue
+                msgs = cr.json().get("content", [])
+            except Exception:
+                continue
+
+            task_has_activity = False
+            for m in msgs:
+                msg_ts = m.get("id") or m.get("timestamp") or 0
+                if not (ts_from <= msg_ts <= ts_to):
+                    continue
+                props = m.get("properties") or {}
+                if props.get("move"):
+                    task_has_activity = True
+                    move_lines.append(f"- {title}: переход по статусам")
+                    continue
+                if props.get("gtd"):
+                    task_has_activity = True
+                    progress_lines.append(f"- {title}: обновление статуса выполнения")
+                    continue
+                txt = strip_html(m.get("text") or "")[:120].strip()
+                if txt:
+                    task_has_activity = True
+                    comm_lines.append(f"- {title}: {txt}")
+
+            if task_has_activity and t.get("subtasks"):
+                total_subs = len(t.get("subtasks") or [])
+                progress_lines.append(f"- {title}: подзадачи {total_subs} шт.")
+
+    parts = []
+    if done_lines:
+        parts.append("СДЕЛАНО:\n" + "\n".join(dict.fromkeys(done_lines)))
+    if move_lines:
+        parts.append("ДВИЖЕНИЕ ПО СТАТУСАМ:\n" + "\n".join(dict.fromkeys(move_lines)))
+    if comm_lines:
+        parts.append("КОММУНИКАЦИЯ:\n" + "\n".join(list(dict.fromkeys(comm_lines))[:80]))
+    if progress_lines:
+        parts.append("ПРОГРЕСС:\n" + "\n".join(dict.fromkeys(progress_lines)))
+    return "\n\n".join(parts) if parts else "Нет значимых действий за выбранный период."
+
+
+def collect_work_summary_hybrid(ts_from: int, ts_to: int, direction: str | None) -> str:
+    event_lines, enough = _event_log_summary(ts_from, ts_to, direction)
+    live = collect_work_summary_range(ts_from, ts_to, direction)
+    if event_lines and enough:
+        return "EVENT_LOG:\n" + "\n".join(event_lines) + "\n\nLIVE_FALLBACK:\n" + live
+    if event_lines:
+        return "EVENT_LOG (частично):\n" + "\n".join(event_lines) + "\n\nLIVE:\n" + live
+    return live
+
+
+def ai_work_summary(raw_data: str, period_label: str, direction: str | None) -> str:
+    """AI-агрегация сводного отчёта о проделанной работе."""
+    dir_label = direction or "все"
+    prompt = (
+        f"Ты — Вася, пацанский AI-помощник. Составь краткий и структурный отчёт о проделанной работе.\n"
+        f"Период: {period_label}. Направление: {dir_label}.\n\n"
+        f"Данные:\n{raw_data}\n\n"
+        f"Составь отчёт строго в формате:\n\n"
+        f"Сделано:\n1. ...\n\n"
+        f"Движение по статусам:\n1. ...\n\n"
+        f"Коммуникация:\n1. ...\n\n"
+        f"Блокеры/риски:\n1. ...\n\n"
+        f"Пиши по-русски, по делу, без markdown-символов."
+    )
+    try:
+        return _ai_call(MODELS_TASK, [{"role": "user", "content": prompt}], max_tokens=1000)
+    except Exception as e:
+        logger.warning(f"AI work summary failed: {e}")
+        return "AI недоступен, попробуй позже."
+
+
+def _report_direction_keyboard() -> InlineKeyboardMarkup:
+    return _build_direction_keyboard(prefix="rdir_", include_all=True)
+
+
 async def handle_report_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает выбор периода для сводного отчёта."""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("3 дня", callback_data="rep_3"),
          InlineKeyboardButton("Неделя", callback_data="rep_7")],
         [InlineKeyboardButton("2 недели", callback_data="rep_14"),
          InlineKeyboardButton("Месяц", callback_data="rep_30")],
+        [InlineKeyboardButton("Свой период", callback_data="rep_custom")],
     ])
-    await update.message.reply_text(
-        "За какой период сделать отчёт, бро?", reply_markup=keyboard,
-    )
+    await update.message.reply_text("За какой период сделать отчёт, бро?", reply_markup=keyboard)
 
 
 async def handle_report_period_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выбор периода → выбор направления."""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    if query.data == "rep_custom":
+        pending_report[user_id] = {"mode": "custom"}
+        context.user_data["awaiting_report_period_text"] = True
+        await query.edit_message_text("Напиши период текстом: 2026-04-01 2026-04-06 или 01.04.2026-06.04.2026")
+        return
+
     days = int(query.data.replace("rep_", ""))
-    pending_report[user_id] = {"days": days}
-
+    ts_to = int(datetime.now().timestamp() * 1000)
+    ts_from = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
     period_labels = {3: "3 дня", 7: "неделя", 14: "2 недели", 30: "месяц"}
-    label = period_labels.get(days, f"{days} дней")
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Альпина", callback_data="rdir_alpina"),
-         InlineKeyboardButton("Welcome", callback_data="rdir_welcome")],
-        [InlineKeyboardButton("Личное", callback_data="rdir_personal"),
-         InlineKeyboardButton("Агентство", callback_data="rdir_agency")],
-        [InlineKeyboardButton("Все направления", callback_data="rdir_all")],
-    ])
+    pending_report[user_id] = {"mode": "days", "days": days, "ts_from": ts_from, "ts_to": ts_to, "label": period_labels.get(days, f"{days} дней")}
     await query.edit_message_text(
-        f"Период: {label}. Какое направление?", reply_markup=keyboard,
+        f"Период: {pending_report[user_id]['label']}. Какое направление?",
+        reply_markup=_report_direction_keyboard(),
     )
 
 
 async def handle_report_direction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выбор направления → сбор данных + AI-отчёт."""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-
     report_data = pending_report.pop(user_id, None)
+    context.user_data.pop("awaiting_report_period_text", None)
     if not report_data:
         await query.edit_message_text("Сессия протухла, давай по новой — жми Отчёт.")
         return
 
-    days = report_data["days"]
-    direction_map = {
-        "rdir_alpina":   "Альпина",
-        "rdir_welcome":  "Welcome",
-        "rdir_personal": "Личное",
-        "rdir_agency":   "Агентство",
-        "rdir_all":      None,
-    }
-    direction = direction_map.get(query.data)
+    suffix = query.data.replace("rdir_", "")
+    direction = None if suffix == "all" else DIRECTION_CALLBACK_MAP.get(suffix)
     dir_label = direction or "все направления"
-    period_labels = {3: "3 дня", 7: "неделю", 14: "2 недели", 30: "месяц"}
-    period_label = period_labels.get(days, f"{days} дней")
-
-    await query.edit_message_text(f"Собираю данные за {period_label} ({dir_label})...")
+    label = report_data.get("label", "период")
+    await query.edit_message_text(f"Собираю данные за {label} ({dir_label})...")
 
     try:
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(None, collect_work_summary, days, direction)
-        ai_text = await loop.run_in_executor(None, ai_work_summary, raw, days, direction)
-
-        header = f"<b>Отчёт за {period_label}</b> | {esc(dir_label)}\n\n"
-        await query.edit_message_text(
-            header + esc(ai_text),
-            parse_mode="HTML",
+        raw = await loop.run_in_executor(
+            None, collect_work_summary_hybrid, report_data["ts_from"], report_data["ts_to"], direction
         )
+        ai_text = await loop.run_in_executor(None, ai_work_summary, raw, label, direction)
+        header = f"<b>Отчёт за {label}</b> | {esc(dir_label)}\n\n"
+        await query.edit_message_text(header + esc(ai_text), parse_mode="HTML")
     except Exception as e:
         await query.edit_message_text(f"Ошибка: {esc(e)}")
 
 
+def _project_keyboard(projects: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for p in projects[:8]:
+        rows.append([InlineKeyboardButton(p.get("title", "Проект"), callback_data=f"tpr_{p['id']}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _board_keyboard(boards: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for b in boards[:12]:
+        rows.append([InlineKeyboardButton(b.get("title", "Доска"), callback_data=f"tbd_{b['id']}")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def handle_add_task_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Го задачу! Пиши текстом или кидай голосовое.\n\n"
-        "Можно в свободной форме, я разберусь:\n"
-        "<i>«Сделать презу для Welcome, дедлайн пятница, важно»</i>\n"
-        "<i>«Закупить домен для Альпины, не горит»</i>\n\n"
-        "А если у тебя запись встречи — кидай аудио (.mp3/.m4a/.wav) или .txt, разберу по полочкам.",
-        parse_mode="HTML", reply_markup=MAIN_MENU,
+    user_id = update.effective_user.id
+    _clear_task_context(context, user_id)
+    projects = get_projects()
+    if not projects:
+        await update.message.reply_text("Не нашёл проекты в YouGile. Проверь доступы API.", reply_markup=MAIN_MENU)
+        return
+    draft = _task_context(context, user_id)
+    draft["projects"] = {p["id"]: p.get("title", "") for p in projects[:20]}
+    await update.message.reply_text("Шаг 1/3. Выбери проект:", reply_markup=_project_keyboard(projects))
+
+
+async def handle_task_project_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    project_id = query.data.replace("tpr_", "")
+    boards = get_boards(project_id)
+    if not boards:
+        await query.edit_message_text("В проекте нет доступных досок. Выбери другой проект.")
+        return
+    draft = _task_context(context, user_id)
+    draft["project_id"] = project_id
+    draft["project_title"] = draft.get("projects", {}).get(project_id, "Проект")
+    draft["boards"] = {b["id"]: b.get("title", "") for b in boards[:30]}
+    await query.edit_message_text(
+        f"Шаг 2/3. Проект: {draft['project_title']}\nВыбери доску:",
+        reply_markup=_board_keyboard(boards),
     )
+
+
+async def handle_task_board_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    board_id = query.data.replace("tbd_", "")
+    draft = _task_context(context, user_id)
+    if board_id not in (draft.get("boards") or {}):
+        await query.edit_message_text("Сессия выбора сбилась. Нажми ➕ ещё раз.")
+        return
+    draft["board_id"] = board_id
+    draft["board_title"] = draft["boards"][board_id]
+    await query.edit_message_text(
+        f"Шаг 3/3. Доска: {draft['board_title']}\nТеперь выбери направление:",
+        reply_markup=_build_direction_keyboard(prefix="tdir_"),
+    )
+
+
+async def handle_task_direction_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    suffix = query.data.replace("tdir_", "")
+    direction = DIRECTION_CALLBACK_MAP.get(suffix)
+    draft = _task_context(context, user_id)
+    if not direction or not draft.get("board_id"):
+        await query.edit_message_text("Сессия выбора сбилась. Нажми ➕ ещё раз.")
+        return
+    draft["direction"] = direction
     context.user_data["awaiting_task"] = True
+    await query.edit_message_text(
+        f"Отлично. Проект: {draft.get('project_title')}\n"
+        f"Доска: {draft.get('board_title')}\n"
+        f"Направление: {direction}\n\n"
+        "Теперь пиши задачу текстом или кидай голосовое/аудио/.txt.",
+    )
 
 
 # --- AI-разбор и подтверждение одной задачи ---
-
-# Маппинг callback → название направления
-DIRECTION_CALLBACK_MAP = {
-    "sdir_alpina":   "Альпина",
-    "sdir_welcome":  "Welcome",
-    "sdir_personal": "Личное",
-    "sdir_agency":   "Агентство",
-}
-
-
 def _deadline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -866,44 +1210,61 @@ def _deadline_keyboard() -> InlineKeyboardMarkup:
 
 
 def _direction_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Альпина",  callback_data="sdir_alpina"),
-            InlineKeyboardButton("Welcome",  callback_data="sdir_welcome"),
-        ],
-        [
-            InlineKeyboardButton("Личное",   callback_data="sdir_personal"),
-            InlineKeyboardButton("Агентство", callback_data="sdir_agency"),
-        ],
-        [InlineKeyboardButton("Пропустить", callback_data="sdir_skip")],
-    ])
+    return _build_direction_keyboard(prefix="sdir_")
 
 
 def _confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Го создавать!", callback_data="stask_confirm")],
+        [InlineKeyboardButton("✏️ Внести правки", callback_data="stedit_menu")],
+        [InlineKeyboardButton("❌ Не, отбой", callback_data="stask_cancel")],
+    ])
+
+
+def _priority_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Го создавать!", callback_data="stask_confirm"),
-        InlineKeyboardButton("❌ Не, отбой",    callback_data="stask_cancel"),
+        InlineKeyboardButton("🔴 High", callback_data="stprio_High"),
+        InlineKeyboardButton("🟡 Medium", callback_data="stprio_Medium"),
+        InlineKeyboardButton("🟢 Low", callback_data="stprio_Low"),
     ]])
 
 
+def _steps_mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧩 Подзадачи", callback_data="ststeps_subtasks"),
+         InlineKeyboardButton("✅ Чеклист", callback_data="ststeps_checklist")],
+    ])
+
+
+def _columns_keyboard(board_id: str) -> InlineKeyboardMarkup:
+    cols = get_columns_by_board(board_id)
+    rows = [[InlineKeyboardButton(col.get("title", "Колонка"), callback_data=f"stcol_{col['id']}")] for col in cols[:12]]
+    return InlineKeyboardMarkup(rows or [[InlineKeyboardButton("Надо сделать", callback_data="stcol_default")]])
+
+
+def _edit_keyboard(task: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Заголовок", callback_data="stedit_title"),
+         InlineKeyboardButton("Описание", callback_data="stedit_description")],
+        [InlineKeyboardButton("Дедлайн", callback_data="stedit_deadline"),
+         InlineKeyboardButton("Приоритет", callback_data="stedit_priority")],
+        [InlineKeyboardButton("Направление", callback_data="stedit_direction"),
+         InlineKeyboardButton("Колонка", callback_data="stedit_column")],
+        [InlineKeyboardButton("Формат шагов", callback_data="stedit_steps")],
+        [InlineKeyboardButton("⬅️ К превью", callback_data="stedit_back")],
+    ])
+
+
 async def _show_single_task_preview(update, context, task: dict, msg):
-    """Показывает превью задачи и определяет первый недостающий шаг."""
+    """Показывает превью задачи перед созданием."""
     user_id = update.effective_user.id
+    task = _normalize_task(task, fallback_direction=task.get("direction"))
+    _ensure_steps_mode(task)
     pending_single_task[user_id] = task
     preview = format_single_task_preview(task)
-
-    if not task.get("deadline"):
-        task["_step"] = "confirm_deadline"
-        text = preview + "\n\n⏰ Братан, дедлайна не было. Поставим?"
-        keyboard = _deadline_keyboard()
-    elif not task.get("direction"):
-        task["_step"] = "confirm_direction"
-        text = preview + "\n\n📦 Какое направление? Или пропустим?"
-        keyboard = _direction_keyboard()
-    else:
-        task["_step"] = "ready"
-        text = preview
-        keyboard = _confirm_keyboard()
+    task["_step"] = "ready"
+    text = preview
+    keyboard = _confirm_keyboard()
 
     await context.bot.edit_message_text(
         text,
@@ -912,25 +1273,6 @@ async def _show_single_task_preview(update, context, task: dict, msg):
         parse_mode="HTML",
         reply_markup=keyboard,
     )
-
-
-async def _advance_to_direction_or_confirm(query, task: dict) -> None:
-    """После выбора дедлайна: переходим к направлению или к финальному превью."""
-    preview = format_single_task_preview(task)
-    if not task.get("direction"):
-        task["_step"] = "confirm_direction"
-        await query.edit_message_text(
-            preview + "\n\n📦 Какое направление? Или пропустим?",
-            parse_mode="HTML",
-            reply_markup=_direction_keyboard(),
-        )
-    else:
-        task["_step"] = "ready"
-        await query.edit_message_text(
-            preview,
-            parse_mode="HTML",
-            reply_markup=_confirm_keyboard(),
-        )
 
 
 async def handle_stask_deadline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -948,8 +1290,16 @@ async def handle_stask_deadline_callback(update: Update, context: ContextTypes.D
         days = int(choice)
         dl_date = date.today() + timedelta(days=days)
         task["deadline"] = dl_date.strftime("%Y-%m-%d")
+    else:
+        task["deadline"] = None
+    context.user_data.pop("editing_single_task_field", None)
 
-    await _advance_to_direction_or_confirm(query, task)
+    task["_step"] = "ready"
+    await query.edit_message_text(
+        format_single_task_preview(task),
+        parse_mode="HTML",
+        reply_markup=_confirm_keyboard(),
+    )
 
 
 async def handle_stask_direction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -962,10 +1312,10 @@ async def handle_stask_direction_callback(update: Update, context: ContextTypes.
         await query.edit_message_text("Братан, сессия протухла. Давай по новой.")
         return
 
-    if query.data != "sdir_skip":
-        direction = DIRECTION_CALLBACK_MAP.get(query.data)
-        if direction:
-            task["direction"] = direction
+    direction = DIRECTION_CALLBACK_MAP.get(query.data.replace("sdir_", ""))
+    if direction:
+        task["direction"] = direction
+    context.user_data.pop("editing_single_task_field", None)
 
     task["_step"] = "ready"
     preview = format_single_task_preview(task)
@@ -976,6 +1326,93 @@ async def handle_stask_direction_callback(update: Update, context: ContextTypes.
     )
 
 
+async def handle_stask_priority_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    task = pending_single_task.get(user_id)
+    if not task:
+        await query.edit_message_text("Сессия протухла. Нажми ➕ ещё раз.")
+        return
+    task["priority"] = query.data.replace("stprio_", "")
+    context.user_data.pop("editing_single_task_field", None)
+    await query.edit_message_text(format_single_task_preview(task), parse_mode="HTML", reply_markup=_confirm_keyboard())
+
+
+async def handle_stask_steps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    task = pending_single_task.get(user_id)
+    if not task:
+        await query.edit_message_text("Сессия протухла. Нажми ➕ ещё раз.")
+        return
+    mode = query.data.replace("ststeps_", "")
+    task["steps_mode"] = "checklist" if mode == "checklist" else "subtasks"
+    _ensure_steps_mode(task)
+    context.user_data.pop("editing_single_task_field", None)
+    await query.edit_message_text(format_single_task_preview(task), parse_mode="HTML", reply_markup=_confirm_keyboard())
+
+
+async def handle_stask_column_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    task = pending_single_task.get(user_id)
+    if not task:
+        await query.edit_message_text("Сессия протухла. Нажми ➕ ещё раз.")
+        return
+    selected_col = query.data.replace("stcol_", "")
+    if selected_col == "default":
+        selected_col = find_column_id(["Надо сделать"], task.get("board_id") or None) or ""
+    cols = {c["id"]: c.get("title", "") for c in get_columns_by_board(task.get("board_id", ""))}
+    if selected_col:
+        task["column_id"] = selected_col
+        task["column_title"] = cols.get(selected_col, task.get("column_title", ""))
+    context.user_data.pop("editing_single_task_field", None)
+    await query.edit_message_text(format_single_task_preview(task), parse_mode="HTML", reply_markup=_confirm_keyboard())
+
+
+async def handle_stask_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    task = pending_single_task.get(user_id)
+    if not task:
+        await query.edit_message_text("Сессия протухла. Нажми ➕ ещё раз.")
+        return
+    action = query.data.replace("stedit_", "")
+    if action == "menu":
+        await query.edit_message_text("Что правим?", reply_markup=_edit_keyboard(task))
+        return
+    if action == "back":
+        await query.edit_message_text(format_single_task_preview(task), parse_mode="HTML", reply_markup=_confirm_keyboard())
+        return
+    if action == "deadline":
+        context.user_data["editing_single_task_field"] = "deadline"
+        await query.edit_message_text("Выбери дедлайн:", reply_markup=_deadline_keyboard())
+        return
+    if action == "priority":
+        await query.edit_message_text("Выбери приоритет:", reply_markup=_priority_keyboard())
+        return
+    if action == "direction":
+        await query.edit_message_text("Выбери направление:", reply_markup=_build_direction_keyboard(prefix="sdir_"))
+        return
+    if action == "steps":
+        await query.edit_message_text("Как хранить шаги?", reply_markup=_steps_mode_keyboard())
+        return
+    if action == "column":
+        board_id = task.get("board_id")
+        await query.edit_message_text("Выбери колонку:", reply_markup=_columns_keyboard(board_id))
+        return
+    context.user_data["editing_single_task_field"] = action
+    hints = {
+        "title": "Введи новый заголовок (до 80 симв.).",
+        "description": "Введи новое описание (можно пусто, отправь '-')",
+    }
+    await query.edit_message_text(hints.get(action, "Введи новое значение текстом."))
+
+
 async def handle_single_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Подтверждение или отмена создания одной задачи."""
     query = update.callback_query
@@ -984,6 +1421,7 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
 
     if query.data == "stask_cancel":
         pending_single_task.pop(user_id, None)
+        _clear_task_context(context, user_id)
         await query.edit_message_text("Отбой, не вопрос.")
         return
 
@@ -994,10 +1432,18 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
 
     await query.edit_message_text("Погнали, создаю...")
     loop = asyncio.get_event_loop()
-    column_id = await loop.run_in_executor(None, find_column_id, ["Надо сделать"])
+    column_id = task.get("column_id") or await loop.run_in_executor(
+        None, find_column_id, ["Надо сделать"], task.get("board_id") or None
+    )
     if not column_id:
         await query.edit_message_text("Блин, колонку 'Надо сделать' не нашёл. Чекни доску.")
         return
+
+    _ensure_steps_mode(task)
+    if task.get("steps_mode") == "subtasks":
+        task["checklist"] = []
+    else:
+        task["subtasks"] = []
 
     ok, data = await loop.run_in_executor(None, create_yougile_task, task, column_id)
     if not ok:
@@ -1008,15 +1454,24 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
     key = data.get("idTaskProject") or data.get("key") or ""
     key_str = f" <code>{esc(key)}</code>" if key else ""
 
-    # Создаём подзадачи
+    # Создаём подзадачи или fallback в чеклист
     subtasks = task.get("subtasks") or []
+    creation_mode = "чеклист"
     if subtasks and tid:
-        # Наследуем стикеры направления и приоритета
         sub_stickers = {}
         direction = task.get("direction")
         if direction and direction in DIRECTION_STATES:
             sub_stickers[STICKER_DIRECTION_ID] = DIRECTION_STATES[direction]
-        await loop.run_in_executor(None, create_subtasks, subtasks, column_id, tid, sub_stickers or None)
+        linked_ok, _child_ids = await loop.run_in_executor(
+            None, create_subtasks, subtasks, column_id, tid, sub_stickers or None
+        )
+        if linked_ok:
+            creation_mode = "подзадачи"
+        else:
+            await loop.run_in_executor(None, add_checklist_to_task, tid, subtasks)
+            creation_mode = "чеклист (fallback)"
+    elif task.get("checklist"):
+        creation_mode = "чеклист"
 
     # Формируем итог
     priority = task.get("priority", "Medium")
@@ -1030,7 +1485,7 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
     direction = task.get("direction")
     dir_line = f"\nНаправление: {esc(direction)}" if direction else ""
 
-    sub_line = f"\nПодзадач создано: {len(subtasks)}" if subtasks else ""
+    sub_line = f"\nШаги: {esc(creation_mode)}"
 
     await query.edit_message_text(
         f"Задача залетела! 🚀{key_str}\n<b>{esc(task['title'][:80])}</b>"
@@ -1038,6 +1493,7 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
         f"\n<a href=\"{task_url(tid)}\">Открыть в YouGile</a>",
         parse_mode="HTML", disable_web_page_preview=True,
     )
+    _clear_task_context(context, user_id)
 
 
 async def prioritize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1154,6 +1610,10 @@ async def chat_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Голосовое → задача (с полным AI-разбором) ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = _task_context(context, update.effective_user.id)
+    if not draft.get("board_id") or not draft.get("direction"):
+        await update.message.reply_text("Сначала нажми ➕ Новая задача и выбери проект/доску/направление.")
+        return
     # Голосовое используется для создания одной задачи только если ожидается задача,
     # либо всегда (удобнее — всегда разбираем как задачу)
     msg = await update.message.reply_text("Секунду, слушаю...")
@@ -1163,6 +1623,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await voice_file.download_to_drive(voice_path)
         loop = asyncio.get_event_loop()
         task = await loop.run_in_executor(None, parse_single_task_from_audio, voice_path)
+        task = _normalize_task(task, fallback_direction=draft.get("direction"))
+        task["project_id"] = draft.get("project_id")
+        task["project_title"] = draft.get("project_title")
+        task["board_id"] = draft.get("board_id")
+        task["board_title"] = draft.get("board_title")
+        task["column_id"] = find_column_id(["Надо сделать", "Входящие", "Бэклог"], draft.get("board_id"))
+        if task["column_id"]:
+            cols = {c["id"]: c.get("title", "") for c in get_columns_by_board(draft.get("board_id", ""))}
+            task["column_title"] = cols.get(task["column_id"], "")
         context.user_data.pop("awaiting_task", None)
         await _show_single_task_preview(update, context, task, msg)
     except json.JSONDecodeError:
@@ -1188,6 +1657,16 @@ async def _process_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not tasks:
             await context.bot.edit_message_text("Задачи не найдены.", chat_id=update.effective_chat.id, message_id=msg.message_id)
             return
+        draft = _task_context(context, update.effective_user.id)
+        normalized = []
+        for t in tasks:
+            tt = _normalize_task(t, fallback_direction=draft.get("direction"))
+            tt["project_id"] = draft.get("project_id")
+            tt["project_title"] = draft.get("project_title")
+            tt["board_id"] = draft.get("board_id")
+            tt["board_title"] = draft.get("board_title")
+            normalized.append(tt)
+        tasks = normalized
         pending_tasks[update.effective_user.id] = tasks
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ Создать все", callback_data="meeting_confirm"),
@@ -1204,6 +1683,10 @@ async def _process_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_txt_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = _task_context(context, update.effective_user.id)
+    if not draft.get("board_id") or not draft.get("direction"):
+        await update.message.reply_text("Сначала нажми ➕ Новая задача и выбери проект/доску/направление.")
+        return
     msg = await update.message.reply_text("Читаю файл...")
     txt_path = "transcript.txt"
     try:
@@ -1224,6 +1707,10 @@ async def handle_txt_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_audio_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = _task_context(context, update.effective_user.id)
+    if not draft.get("board_id") or not draft.get("direction"):
+        await update.message.reply_text("Сначала нажми ➕ Новая задача и выбери проект/доску/направление.")
+        return
     msg = await update.message.reply_text("Загружаю аудио...")
     audio_path = "meeting_audio.mp3"
     try:
@@ -1269,6 +1756,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if query.data == "meeting_cancel":
         pending_tasks.pop(user_id, None)
+        _clear_task_context(context, user_id)
         await query.edit_message_text("Отбой, не вопрос.")
         return
 
@@ -1282,31 +1770,51 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.edit_message_text("Создаю задачи...")
     loop = asyncio.get_event_loop()
-    column_id = await loop.run_in_executor(None, find_column_id)
-    if not column_id:
-        await query.edit_message_text("Колонка не найдена.")
-        return
 
     results = []
     for i, task in enumerate(tasks, 1):
+        board_id = task.get("board_id")
+        column_id = task.get("column_id") or await loop.run_in_executor(
+            None, find_column_id, ["Надо сделать", "Входящие", "Бэклог"], board_id or None
+        )
+        if not column_id:
+            results.append(f"{i}. ❌ <b>{esc(task['title'][:55])}</b>\n   Колонка не найдена")
+            continue
+        _ensure_steps_mode(task)
+        if task.get("steps_mode") == "subtasks":
+            task["checklist"] = []
         ok, data = await loop.run_in_executor(None, create_yougile_task, task, column_id)
         emoji = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(task.get("priority", "Medium"), "⚪")
         if ok:
             tid = data.get("id", "")
             key = data.get("idTaskProject") or data.get("key") or ""
             key_str = f" <code>{esc(key)}</code>" if key else ""
-            results.append(f"{i}. ✅ {emoji} <b>{esc(task['title'][:55])}</b>{key_str}\n   🔗 <a href=\"{task_url(tid)}\">Открыть</a>")
+            mode_line = ""
+            if task.get("subtasks"):
+                linked_ok, _ = await loop.run_in_executor(None, create_subtasks, task["subtasks"], column_id, tid, None)
+                if linked_ok:
+                    mode_line = "\n   🧩 Подзадачи"
+                else:
+                    await loop.run_in_executor(None, add_checklist_to_task, tid, task["subtasks"])
+                    mode_line = "\n   ✅ Чеклист (fallback)"
+            elif task.get("checklist"):
+                mode_line = "\n   ✅ Чеклист"
+            results.append(
+                f"{i}. ✅ {emoji} <b>{esc(task['title'][:55])}</b>{key_str}{mode_line}\n   🔗 <a href=\"{task_url(tid)}\">Открыть</a>"
+            )
         else:
             results.append(f"{i}. ❌ {emoji} <b>{esc(task['title'][:55])}</b>\n   {esc(str(data)[:80])}")
 
     ok_count = sum(1 for r in results if "✅" in r)
     summary = f"Создано <b>{ok_count}/{len(tasks)}</b>:\n\n" + "\n\n".join(results)
     await query.edit_message_text(summary, parse_mode="HTML", disable_web_page_preview=True)
+    _clear_task_context(context, user_id)
 
 
 # --- Текстовые сообщения ---
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+    user_id = update.effective_user.id
 
     # Кнопки меню
     if text == BTN_ACTIVE:
@@ -1324,13 +1832,73 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
+    # Ввод пользовательского периода отчёта
+    if context.user_data.get("awaiting_report_period_text"):
+        parsed = _period_from_text(text)
+        if not parsed:
+            await update.message.reply_text("Не понял даты. Формат: 2026-04-01 2026-04-06 или 01.04.2026-06.04.2026")
+            return
+        ts_from, ts_to, label = parsed
+        pending_report[user_id] = {"mode": "custom", "ts_from": ts_from, "ts_to": ts_to, "label": label}
+        context.user_data["awaiting_report_period_text"] = False
+        await update.message.reply_text(
+            f"Период: {label}. Теперь выбери направление:",
+            reply_markup=_report_direction_keyboard(),
+        )
+        return
+
+    # Редактирование полей single-task после кнопки "Внести правки"
+    edit_field = context.user_data.get("editing_single_task_field")
+    if edit_field:
+        task = pending_single_task.get(user_id)
+        if not task:
+            context.user_data.pop("editing_single_task_field", None)
+            await update.message.reply_text("Сессия правок протухла. Нажми ➕ ещё раз.")
+            return
+        if edit_field == "title":
+            task["title"] = text[:80]
+        elif edit_field == "description":
+            task["description"] = "" if text == "-" else text
+        elif edit_field == "deadline":
+            if text == "-":
+                task["deadline"] = None
+            else:
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                    task["deadline"] = text
+                else:
+                    await update.message.reply_text("Для дедлайна используй YYYY-MM-DD или '-' чтобы убрать.")
+                    return
+        context.user_data.pop("editing_single_task_field", None)
+        await update.message.reply_text(
+            format_single_task_preview(task),
+            parse_mode="HTML",
+            reply_markup=_confirm_keyboard(),
+        )
+        return
+
     # Если ожидаем задачу (после нажатия ➕) — разбираем через AI
     if context.user_data.get("awaiting_task"):
         context.user_data.pop("awaiting_task", None)
         msg = await update.message.reply_text("Разбираю, чё написал...")
         try:
             loop = asyncio.get_event_loop()
+            draft = _task_context(context, user_id)
+            if not draft.get("board_id") or not draft.get("direction"):
+                await context.bot.edit_message_text(
+                    "Сначала выбери проект/доску/направление через ➕ Новая задача.",
+                    chat_id=update.effective_chat.id, message_id=msg.message_id,
+                )
+                return
             task = await loop.run_in_executor(None, parse_single_task, text)
+            task = _normalize_task(task, fallback_direction=draft.get("direction"))
+            task["project_id"] = draft.get("project_id")
+            task["project_title"] = draft.get("project_title")
+            task["board_id"] = draft.get("board_id")
+            task["board_title"] = draft.get("board_title")
+            task["column_id"] = find_column_id(["Надо сделать", "Входящие", "Бэклог"], draft.get("board_id"))
+            if task["column_id"]:
+                cols = {c["id"]: c.get("title", "") for c in get_columns_by_board(draft.get("board_id", ""))}
+                task["column_title"] = cols.get(task["column_id"], "")
             await _show_single_task_preview(update, context, task, msg)
         except json.JSONDecodeError:
             await context.bot.edit_message_text(
@@ -1384,9 +1952,18 @@ if __name__ == "__main__":
     ))
     app.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_txt_file))
 
-    # Callbacks — создание одной задачи (дедлайн / направление / подтверждение)
+    # Callbacks — выбор контекста новой задачи (проект / доска / направление)
+    app.add_handler(CallbackQueryHandler(handle_task_project_callback, pattern="^tpr_"))
+    app.add_handler(CallbackQueryHandler(handle_task_board_callback, pattern="^tbd_"))
+    app.add_handler(CallbackQueryHandler(handle_task_direction_preset_callback, pattern="^tdir_"))
+
+    # Callbacks — создание/редактирование одной задачи
     app.add_handler(CallbackQueryHandler(handle_stask_deadline_callback,   pattern="^sdt_"))
     app.add_handler(CallbackQueryHandler(handle_stask_direction_callback,  pattern="^sdir_"))
+    app.add_handler(CallbackQueryHandler(handle_stask_priority_callback,   pattern="^stprio_"))
+    app.add_handler(CallbackQueryHandler(handle_stask_steps_callback,      pattern="^ststeps_"))
+    app.add_handler(CallbackQueryHandler(handle_stask_column_callback,     pattern="^stcol_"))
+    app.add_handler(CallbackQueryHandler(handle_stask_edit_callback,       pattern="^stedit_"))
     app.add_handler(CallbackQueryHandler(handle_single_task_callback,      pattern="^stask_"))
     # Callbacks — отчёты
     app.add_handler(CallbackQueryHandler(handle_report_period_callback,    pattern="^rep_"))
