@@ -7,6 +7,7 @@ import json
 import asyncio
 import time
 import re
+from functools import partial
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
@@ -16,6 +17,7 @@ from telegram.ext import (
 )
 from openai import OpenAI
 import ai_prioritizer
+import yougile_config as yc
 
 load_dotenv()
 
@@ -67,14 +69,12 @@ DIRECTION_STATES = {
     "Агентство": "00db86f5a160",
 }
 
-# Проект и доска
-TARGET_PROJECT = "Продуктивность"
-TARGET_BOARD   = "Задачи лог"
+# Проект и доска (см. yougile_config / env YOUGILE_DEFAULT_PROJECT, YOUGILE_DEFAULT_BOARD)
+TARGET_PROJECT = yc.DEFAULT_PROJECT
+TARGET_BOARD = yc.DEFAULT_BOARD
 EVENT_LOG_API_URL = os.environ.get("EVENT_LOG_API_URL", "").rstrip("/")
 
-# Колонки, которые считаются «активными» (задачи требуют действий)
-ACTIVE_COLUMNS = ["Надо сделать", "В работе", "На согласовании"]
-# Колонки с завершёнными задачами
+# Колонки с завершёнными задачами (для будущих фильтров)
 DONE_COLUMNS = ["Готово"]
 
 # Кэш
@@ -132,6 +132,38 @@ CHAT_SYSTEM_PROMPT = (
 # --- Утилиты ---
 def esc(text) -> str:
     return html.escape(str(text))
+
+
+def chunk_telegram_html(text: str, max_len: int | None = None) -> list[str]:
+    """Делит HTML-текст на части под лимит Telegram (~4096)."""
+    limit = max_len or yc.TELEGRAM_HTML_MAX
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    buf: list[str] = []
+    n = 0
+
+    def flush():
+        nonlocal buf, n
+        if buf:
+            parts.append("\n".join(buf))
+            buf = []
+            n = 0
+
+    for raw_line in text.split("\n"):
+        line = raw_line
+        while len(line) > limit:
+            parts.append(line[:limit])
+            line = line[limit:]
+        add = len(line) + (1 if buf else 0)
+        if n + add > limit and buf:
+            flush()
+        if buf:
+            n += 1
+        buf.append(line)
+        n += len(line)
+    flush()
+    return parts
 
 
 def strip_html(text: str) -> str:
@@ -295,28 +327,84 @@ def _headers():
     return {"Authorization": f"Bearer {YOUGILE_API_KEY}", "Content-Type": "application/json"}
 
 
-def _find_project_board() -> tuple[str | None, str | None]:
+def invalidate_project_board_cache() -> None:
     global _project_id, _board_id
+    _project_id = None
+    _board_id = None
+
+
+def find_default_project_board_with_diagnostics(reset_cache: bool = False) -> tuple[str | None, str | None, str]:
+    """Возвращает (project_id, board_id, сообщение_об_ошибке). При успехе err пустая строка."""
+    global _project_id, _board_id
+    if reset_cache:
+        _project_id = None
+        _board_id = None
     if _project_id and _board_id:
-        return _project_id, _board_id
+        return _project_id, _board_id, ""
     h = _headers()
-    r = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=h, params={"limit": 50})
+    try:
+        r = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=h, params={"limit": 50}, timeout=30)
+    except Exception as e:
+        return None, None, f"Сеть/YouGile недоступны: {e}"
+    if r.status_code == 401:
+        return None, None, "YouGile API: неверный ключ (401). Проверь YOUGILE_API_KEY."
+    if r.status_code == 403:
+        return None, None, "YouGile API: доступ запрещён (403)."
     if r.status_code != 200:
-        return None, None
-    for p in r.json().get("content", []):
-        if p.get("title") == TARGET_PROJECT:
+        return None, None, f"YouGile API: /projects вернул HTTP {r.status_code}."
+    projects = [p for p in r.json().get("content", []) if not p.get("deleted")]
+    proj_titles = [p.get("title") for p in projects]
+    for p in projects:
+        if p.get("title") == yc.DEFAULT_PROJECT:
             _project_id = p["id"]
             break
     if not _project_id:
-        return None, None
-    r = requests.get(f"{YOUGILE_BASE_URL}/boards", headers=h, params={"projectId": _project_id, "limit": 50})
+        hint = ", ".join(str(t) for t in proj_titles[:8]) or "пусто"
+        return None, None, (
+            f"Проект «{yc.DEFAULT_PROJECT}» не найден. Укажи YOUGILE_DEFAULT_PROJECT в .env. "
+            f"Доступные примеры: {hint}"
+        )
+    try:
+        r = requests.get(
+            f"{YOUGILE_BASE_URL}/boards", headers=h, params={"projectId": _project_id, "limit": 50}, timeout=30
+        )
+    except Exception as e:
+        return _project_id, None, f"Ошибка запроса досок: {e}"
     if r.status_code != 200:
-        return None, None
-    for b in r.json().get("content", []):
-        if b.get("title") == TARGET_BOARD:
+        return _project_id, None, f"YouGile API: /boards вернул HTTP {r.status_code}."
+    boards = [b for b in r.json().get("content", []) if not b.get("deleted")]
+    board_titles = [b.get("title") for b in boards]
+    for b in boards:
+        if b.get("title") == yc.DEFAULT_BOARD:
             _board_id = b["id"]
             break
-    return _project_id, _board_id
+    if not _board_id:
+        hint = ", ".join(str(t) for t in board_titles[:8]) or "пусто"
+        return _project_id, None, (
+            f"Доска «{yc.DEFAULT_BOARD}» не найдена. Укажи YOUGILE_DEFAULT_BOARD в .env. "
+            f"Доступные примеры: {hint}"
+        )
+    return _project_id, _board_id, ""
+
+
+def _find_project_board() -> tuple[str | None, str | None]:
+    pid, bid, _ = find_default_project_board_with_diagnostics()
+    return pid, bid
+
+
+def resolve_list_board_id_for_user(context: ContextTypes.DEFAULT_TYPE | None, user_id: int) -> tuple[str | None, str]:
+    """Доска для списков: последний выбор в «Новая задача», иначе дефолт из env."""
+    if context and getattr(context, "user_data", None):
+        draft = context.user_data.get("task_drafts", {}).get(user_id) or {}
+        bid = draft.get("board_id")
+        if bid:
+            cols = get_columns_by_board(bid)
+            if cols:
+                return bid, ""
+            invalidate_project_board_cache()
+            logger.warning("board_id из черновика не дал колонок, сброс кэша и дефолтная доска")
+    _, bid, err = find_default_project_board_with_diagnostics()
+    return bid, err
 
 
 def get_projects() -> list[dict]:
@@ -348,9 +436,30 @@ def get_columns() -> list[dict]:
     return get_columns_by_board(board_id)
 
 
-def get_column_tasks(column_id: str, limit: int = 100) -> list[dict]:
-    r = requests.get(f"{YOUGILE_BASE_URL}/task-list", headers=_headers(), params={"columnId": column_id, "limit": limit})
-    return r.json().get("content", []) if r.status_code == 200 else []
+def get_column_tasks(column_id: str, limit: int | None = None, paginate: bool = True) -> list[dict]:
+    """Список задач колонки с пагинацией (offset), до YOUGILE_TASK_LIST_MAX_PAGES страниц."""
+    lim = limit if limit is not None else yc.TASK_LIST_LIMIT
+    lim = max(1, min(1000, lim))
+    out: list[dict] = []
+    offset = 0
+    for _ in range(yc.TASK_LIST_MAX_PAGES):
+        try:
+            r = requests.get(
+                f"{YOUGILE_BASE_URL}/task-list",
+                headers=_headers(),
+                params={"columnId": column_id, "limit": lim, "offset": offset},
+                timeout=30,
+            )
+        except Exception:
+            break
+        if r.status_code != 200:
+            break
+        batch = r.json().get("content", []) or []
+        out.extend(batch)
+        if not paginate or len(batch) < lim:
+            break
+        offset += len(batch)
+    return out
 
 
 
@@ -434,18 +543,25 @@ def create_yougile_task(task: dict, column_id: str) -> tuple[bool, dict | str]:
 
 
 # --- Функция 1: Активные задачи (требуют действий) ---
-def get_active_tasks_full() -> tuple[str, list[dict]]:
+def get_active_tasks_full(board_id: str | None = None, list_diag: str = "") -> tuple[str, list[dict]]:
     """Собирает задачи из активных колонок. Возвращает (HTML-текст, raw для AI)."""
-    columns = get_columns()
+    active_norm = yc.active_column_normalized_set()
+    if board_id:
+        columns = get_columns_by_board(board_id)
+    else:
+        columns = get_columns()
     if not columns:
-        return "Не удалось получить колонки.", []
+        hint = list_diag.strip() or "Проверь YOUGILE_DEFAULT_PROJECT / YOUGILE_DEFAULT_BOARD и доступ API."
+        return f"Не удалось получить колонки. {hint}", []
 
     result_parts = []
     tasks_raw = []
     total = 0
+    matched_any_column = False
     for col in columns:
-        if col["title"] not in ACTIVE_COLUMNS:
+        if not yc.column_title_matches(col.get("title", ""), active_norm):
             continue
+        matched_any_column = True
         tasks = get_column_tasks(col["id"])
         active = [t for t in tasks if not t.get("completed") and not t.get("archived")]
         if not active:
@@ -489,7 +605,16 @@ def get_active_tasks_full() -> tuple[str, list[dict]]:
         result_parts.append("\n".join(lines))
 
     if not result_parts:
-        return "Нет активных задач. Всё чисто! 💪", []
+        all_titles = [c.get("title") or "?" for c in columns]
+        titles_hint = ", ".join(all_titles[:20])
+        if not matched_any_column:
+            want = ", ".join(yc.ACTIVE_COLUMN_TITLES)
+            return (
+                f"На доске нет колонок с именами как в настройке ({want}). "
+                f"Колонки на доске: {titles_hint}. Задай YOUGILE_ACTIVE_COLUMNS через запятую.",
+                [],
+            )
+        return "Нет активных задач в выбранных колонках. Всё чисто! 💪", []
 
     header = f"📋 <b>Активные задачи</b> — {total} шт.\n"
     return header + "\n".join(result_parts), tasks_raw
@@ -544,7 +669,7 @@ def collect_work_summary(days: int, direction: str | None = None) -> str:
     processed_detail = 0  # счётчик задач, для которых тянем комменты + подзадачи
 
     for col in columns:
-        tasks = get_column_tasks(col["id"], limit=200)
+        tasks = get_column_tasks(col["id"])
         for t in tasks:
             # Фильтр по направлению
             if direction:
@@ -564,7 +689,7 @@ def collect_work_summary(days: int, direction: str | None = None) -> str:
                     completed_items.append(f"- {title}" + (f": {desc}" if desc else ""))
 
             # Активные задачи — собираем свежие комменты и подзадачи
-            elif col["title"] in ACTIVE_COLUMNS:
+            elif yc.column_title_matches(col.get("title", ""), yc.active_column_normalized_set()):
                 task_info = f"- {title} [колонка: {col['title']}]"
 
                 if processed_detail < 50:
@@ -615,26 +740,6 @@ def collect_work_summary(days: int, direction: str | None = None) -> str:
         parts.append("АКТИВНЫЕ ЗАДАЧИ (с прогрессом):\n" + "\n".join(active_items))
 
     return "\n\n".join(parts) if parts else "Нет данных за этот период."
-
-
-def ai_work_summary(raw_data: str, days: int, direction: str | None) -> str:
-    """AI-агрегация сводного отчёта о проделанной работе."""
-    dir_label = direction or "все"
-    prompt = (
-        f"Ты — Вася, пацанский AI-помощник. Составь краткий отчёт о проделанной работе.\n"
-        f"Период: {days} дней. Направление: {dir_label}.\n\n"
-        f"Данные:\n{raw_data}\n\n"
-        f"Составь отчёт строго в формате:\n\n"
-        f"Сделано:\n1. [краткое описание что сделано]\n2. ...\n\n"
-        f"В процессе:\n1. [что делается, какой прогресс]\n2. ...\n\n"
-        f"Будь краток, объединяй мелкие подзадачи в общие пункты. "
-        f"Пиши по-русски, по-деловому но дружелюбно. Без markdown-символов."
-    )
-    try:
-        return _ai_call(MODELS_TASK, [{"role": "user", "content": prompt}], max_tokens=800)
-    except Exception as e:
-        logger.warning(f"AI work summary failed: {e}")
-        return "AI недоступен, попробуй позже."
 
 
 # --- Промпт и разбор одной задачи ---
@@ -834,23 +939,33 @@ async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_active_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    board_id, list_diag = resolve_list_board_id_for_user(context, user_id)
     msg = await update.message.reply_text("Гружу задачки...", reply_markup=MAIN_MENU)
     try:
         loop = asyncio.get_event_loop()
-        text, tasks_raw = await loop.run_in_executor(None, get_active_tasks_full)
+        text, tasks_raw = await loop.run_in_executor(
+            None, partial(get_active_tasks_full, board_id=board_id, list_diag=list_diag),
+        )
+        chunks = chunk_telegram_html(text)
         await context.bot.edit_message_text(
-            text, chat_id=update.effective_chat.id, message_id=msg.message_id,
+            chunks[0], chat_id=update.effective_chat.id, message_id=msg.message_id,
             parse_mode="HTML", disable_web_page_preview=True,
         )
+        for part in chunks[1:]:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=part,
+                parse_mode="HTML", disable_web_page_preview=True,
+            )
         # AI-анализ вторым сообщением (без повторных API-запросов)
         if tasks_raw:
             ai_text = await loop.run_in_executor(None, ai_active_analysis, tasks_raw)
             if ai_text:
-                await context.bot.send_message(
-                    chat_id=update.effective_chat.id,
-                    text=f"🤖 <b>На что обратить внимание:</b>\n{esc(ai_text)}",
-                    parse_mode="HTML",
-                )
+                ai_msg = f"🤖 <b>На что обратить внимание:</b>\n{esc(ai_text)}"
+                for ac in chunk_telegram_html(ai_msg):
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id, text=ac, parse_mode="HTML",
+                    )
     except Exception as e:
         await context.bot.edit_message_text(
             f"Ошибка: {esc(e)}", chat_id=update.effective_chat.id, message_id=msg.message_id,
@@ -944,14 +1059,14 @@ def collect_work_summary_range(ts_from: int, ts_to: int, direction: str | None =
     columns = get_columns()
     if not columns:
         return "Нет данных по колонкам."
-    active_set = set(ACTIVE_COLUMNS)
+    active_norm = yc.active_column_normalized_set()
     done_lines: list[str] = []
     move_lines: list[str] = []
     comm_lines: list[str] = []
     progress_lines: list[str] = []
 
     for col in columns:
-        tasks = get_column_tasks(col["id"], limit=200)
+        tasks = get_column_tasks(col["id"])
         for t in tasks:
             stickers = t.get("stickers") or {}
             if direction and stickers.get(STICKER_DIRECTION_ID) != DIRECTION_STATES.get(direction):
@@ -967,7 +1082,7 @@ def collect_work_summary_range(ts_from: int, ts_to: int, direction: str | None =
                     done_lines.append(f"- {title}")
 
             # Оставляем только задачи с фактической активностью в периоде.
-            if col.get("title") not in active_set:
+            if not yc.column_title_matches(col.get("title", ""), active_norm):
                 continue
             try:
                 cr = requests.get(
@@ -1511,18 +1626,21 @@ async def prioritize_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-def _get_filtered_tasks(filter_type: str) -> str:
+def _get_filtered_tasks(filter_type: str, board_id: str | None = None, list_diag: str = "") -> str:
     """Фильтрация задач без AI — чисто по данным API."""
-    columns = get_columns()
+    if board_id:
+        columns = get_columns_by_board(board_id)
+    else:
+        columns = get_columns()
     if not columns:
-        return "Не удалось получить колонки."
+        return "Не удалось получить колонки." + (f" {list_diag}" if list_diag else "")
 
-    today_ts = int(datetime.now().timestamp() * 1000)
     today_date = date.today()
     results = []
+    active_norm = yc.active_column_normalized_set()
 
     for col in columns:
-        if col["title"] not in ACTIVE_COLUMNS:
+        if not yc.column_title_matches(col.get("title", ""), active_norm):
             continue
         tasks = get_column_tasks(col["id"])
         for t in tasks:
@@ -1582,12 +1700,16 @@ async def handle_prio_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     filter_type = query.data.replace("prio_", "")
+    user_id = update.effective_user.id
+    board_id, list_diag = resolve_list_board_id_for_user(context, user_id)
 
     if filter_type == "ai":
         await query.edit_message_text("🤖 AI расставляет приоритеты (до 10 задач)...")
         try:
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, ai_prioritizer.run_prioritization, YOUGILE_API_KEY)
+            result = await loop.run_in_executor(
+                None, partial(ai_prioritizer.run_prioritization, YOUGILE_API_KEY, board_id=board_id),
+            )
             await query.edit_message_text(esc(result))
         except Exception as e:
             await query.edit_message_text(f"Ошибка: {esc(e)}")
@@ -1596,8 +1718,16 @@ async def handle_prio_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("Анализирую...")
     try:
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, _get_filtered_tasks, filter_type)
-        await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True)
+        text = await loop.run_in_executor(
+            None, partial(_get_filtered_tasks, filter_type, board_id=board_id, list_diag=list_diag),
+        )
+        chunks = chunk_telegram_html(text)
+        await query.edit_message_text(chunks[0], parse_mode="HTML", disable_web_page_preview=True)
+        for part in chunks[1:]:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, text=part,
+                parse_mode="HTML", disable_web_page_preview=True,
+            )
     except Exception as e:
         await query.edit_message_text(f"Ошибка: {esc(e)}")
 

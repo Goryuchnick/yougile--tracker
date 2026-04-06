@@ -5,6 +5,8 @@ import logging
 from dotenv import load_dotenv
 from openai import OpenAI
 
+import yougile_config as yc
+
 load_dotenv()
 
 YOUGILE_BASE_URL   = "https://yougile.com/api-v2"
@@ -23,10 +25,6 @@ PRIORITY_STATES = {
     "Medium": "55e6b0a1cb68",
     "Low":    "414cda413f0a",
 }
-
-TARGET_PROJECT      = "Продуктивность"
-TARGET_BOARD        = "Задачи лог"
-TARGET_COLUMN_NAMES = ["Надо сделать", "Бэклог", "Входящие", "В работе"]
 
 
 def get_client() -> OpenAI:
@@ -72,51 +70,85 @@ def analyze_priority(title: str, description: str) -> str | None:
     return None
 
 
-def run_prioritization(yougile_api_key: str, client=None, model: str = None) -> str:
+def _fetch_column_tasks(column_id: str, headers: dict) -> list[dict]:
+    out: list[dict] = []
+    offset = 0
+    lim = yc.TASK_LIST_LIMIT
+    for _ in range(yc.TASK_LIST_MAX_PAGES):
+        tr = requests.get(
+            f"{YOUGILE_BASE_URL}/task-list",
+            headers=headers,
+            params={"columnId": column_id, "limit": lim, "offset": offset},
+            timeout=30,
+        )
+        if tr.status_code != 200:
+            break
+        batch = tr.json().get("content", []) or []
+        out.extend(batch)
+        if len(batch) < lim:
+            break
+        offset += len(batch)
+    return out
+
+
+def run_prioritization(yougile_api_key: str, board_id: str | None = None, client=None, model: str = None) -> str:
     report = ["--- AI Приоритизация ---"]
     headers = {"Authorization": f"Bearer {yougile_api_key}", "Content-Type": "application/json"}
+    prio_cols = yc.priority_ai_column_normalized_set()
 
-    try:
-        r = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=headers, params={"limit": 50})
+    if board_id:
+        r = requests.get(
+            f"{YOUGILE_BASE_URL}/columns", headers=headers, params={"boardId": board_id, "limit": 50}, timeout=30
+        )
         if r.status_code != 200:
-            return f"Ошибка: {r.status_code}"
-    except Exception as e:
-        return f"Ошибка подключения: {e}"
+            return f"Ошибка колонок: {r.status_code}"
+        columns_payload = r.json().get("content", [])
+    else:
+        try:
+            r = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=headers, params={"limit": 50}, timeout=30)
+            if r.status_code == 401:
+                return "YouGile API: неверный ключ (401)."
+            if r.status_code != 200:
+                return f"Ошибка: {r.status_code}"
+        except Exception as e:
+            return f"Ошибка подключения: {e}"
 
-    project_id = None
-    for p in r.json().get("content", []):
-        if p.get("title") == TARGET_PROJECT:
-            project_id = p["id"]
-            break
-    if not project_id:
-        return f"Проект «{TARGET_PROJECT}» не найден."
+        project_id = None
+        for p in r.json().get("content", []):
+            if p.get("title") == yc.DEFAULT_PROJECT:
+                project_id = p["id"]
+                break
+        if not project_id:
+            return f"Проект «{yc.DEFAULT_PROJECT}» не найден. Задай YOUGILE_DEFAULT_PROJECT."
 
-    r = requests.get(f"{YOUGILE_BASE_URL}/boards", headers=headers, params={"projectId": project_id, "limit": 50})
-    if r.status_code != 200:
-        return f"Ошибка досок: {r.status_code}"
+        r = requests.get(
+            f"{YOUGILE_BASE_URL}/boards", headers=headers, params={"projectId": project_id, "limit": 50}, timeout=30
+        )
+        if r.status_code != 200:
+            return f"Ошибка досок: {r.status_code}"
 
-    board_id = None
-    for b in r.json().get("content", []):
-        if b.get("title") == TARGET_BOARD:
-            board_id = b["id"]
-            break
-    if not board_id:
-        return f"Доска «{TARGET_BOARD}» не найдена."
+        board_id = None
+        for b in r.json().get("content", []):
+            if b.get("title") == yc.DEFAULT_BOARD:
+                board_id = b["id"]
+                break
+        if not board_id:
+            return f"Доска «{yc.DEFAULT_BOARD}» не найдена. Задай YOUGILE_DEFAULT_BOARD."
 
-    r = requests.get(f"{YOUGILE_BASE_URL}/columns", headers=headers, params={"boardId": board_id, "limit": 50})
-    if r.status_code != 200:
-        return f"Ошибка колонок: {r.status_code}"
+        r = requests.get(
+            f"{YOUGILE_BASE_URL}/columns", headers=headers, params={"boardId": board_id, "limit": 50}, timeout=30
+        )
+        if r.status_code != 200:
+            return f"Ошибка колонок: {r.status_code}"
+        columns_payload = r.json().get("content", [])
 
     updated = 0
     MAX_TASKS = 10  # Лимит задач за один запуск
     processed = 0
-    for col in r.json().get("content", []):
-        if col["title"] not in TARGET_COLUMN_NAMES:
+    for col in columns_payload:
+        if not yc.column_title_matches(col.get("title", ""), prio_cols):
             continue
-        tr = requests.get(f"{YOUGILE_BASE_URL}/task-list", headers=headers, params={"columnId": col["id"], "limit": 50})
-        if tr.status_code != 200:
-            continue
-        for task in tr.json().get("content", []):
+        for task in _fetch_column_tasks(col["id"], headers):
             if task.get("stickers", {}).get(STICKER_PRIORITY_ID):
                 continue
             if processed >= MAX_TASKS:
