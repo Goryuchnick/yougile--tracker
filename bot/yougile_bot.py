@@ -358,9 +358,10 @@ def resolve_welcome_mirror_column_id() -> str | None:
             rp = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=hw, params={"limit": 100}, timeout=30)
             if rp.status_code != 200:
                 return None
+            want_proj = yc.normalize_title_for_match(yc.YOUGILE_WELCOME_PROJECT)
             pid = None
             for p in rp.json().get("content", []):
-                if not p.get("deleted") and p.get("title") == yc.YOUGILE_WELCOME_PROJECT:
+                if not p.get("deleted") and yc.normalize_title_for_match(p.get("title", "")) == want_proj:
                     pid = p["id"]
                     break
             if not pid:
@@ -371,9 +372,10 @@ def resolve_welcome_mirror_column_id() -> str | None:
             )
             if rb.status_code != 200:
                 return None
+            want_board = yc.normalize_title_for_match(yc.YOUGILE_WELCOME_BOARD)
             board_id = None
             for b in rb.json().get("content", []):
-                if not b.get("deleted") and b.get("title") == yc.YOUGILE_WELCOME_BOARD:
+                if not b.get("deleted") and yc.normalize_title_for_match(b.get("title", "")) == want_board:
                     board_id = b["id"]
                     break
             if not board_id:
@@ -397,7 +399,9 @@ def resolve_welcome_mirror_column_id() -> str | None:
 
 
 def mirror_task_to_welcome(task: dict) -> tuple[bool, str]:
-    """Дублирует карточку в компанию Welcome (без стикеров и исполнителей). Возвращает (успех, HTML-фрагмент для сообщения)."""
+    """Дублирует карточку в компанию Welcome (без стикеров и исполнителей). Только если стикер направления — Welcome. Возвращает (успех, HTML-фрагмент для сообщения)."""
+    if task.get("direction") != "Welcome":
+        return True, ""
     if not yc.YOUGILE_API_KEY_WELCOME:
         return True, ""
     hw = _headers_welcome()

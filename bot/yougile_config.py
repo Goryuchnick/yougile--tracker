@@ -46,12 +46,21 @@ YOUGILE_API_KEY_WELCOME = (os.environ.get("YOUGILE_API_KEY_WELCOME") or "").stri
 YOUGILE_WELCOME_BOARD_ID = (os.environ.get("YOUGILE_WELCOME_BOARD_ID") or "").strip()
 # Либо точные названия проекта и доски (если BOARD_ID не задан):
 YOUGILE_WELCOME_PROJECT = (os.environ.get("YOUGILE_WELCOME_PROJECT") or "Маркетинг").strip()
-YOUGILE_WELCOME_BOARD = (os.environ.get("YOUGILE_WELCOME_BOARD") or "Онлайн — маркетинг").strip()
+YOUGILE_WELCOME_BOARD = (os.environ.get("YOUGILE_WELCOME_BOARD") or "Онлайн-маркетинг").strip()
 YOUGILE_WELCOME_COLUMN = (os.environ.get("YOUGILE_WELCOME_COLUMN") or "Надо сделать").strip()
 
 
 def normalize_column_title(title: str) -> str:
     return " ".join((title or "").strip().lower().split())
+
+
+def normalize_title_for_match(title: str) -> str:
+    """Сравнение названий проекта/доски: em/en dash, пробелы вокруг дефиса."""
+    t = (title or "").strip().lower()
+    for ch in ("\u2014", "\u2013", "\u2212"):
+        t = t.replace(ch, "-")
+    t = " ".join(t.split())
+    return t.replace(" ", "")
 
 
 def active_column_normalized_set() -> set[str]:
