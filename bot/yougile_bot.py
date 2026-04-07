@@ -327,6 +327,113 @@ def _headers():
     return {"Authorization": f"Bearer {YOUGILE_API_KEY}", "Content-Type": "application/json"}
 
 
+def _headers_welcome() -> dict | None:
+    if not yc.YOUGILE_API_KEY_WELCOME:
+        return None
+    return {"Authorization": f"Bearer {yc.YOUGILE_API_KEY_WELCOME}", "Content-Type": "application/json"}
+
+
+_welcome_mirror_column_id: str | None = None
+
+
+def resolve_welcome_mirror_column_id() -> str | None:
+    """Колонка на доске Welcome для дубля (кэшируется)."""
+    global _welcome_mirror_column_id
+    if _welcome_mirror_column_id:
+        return _welcome_mirror_column_id
+    hw = _headers_welcome()
+    if not hw:
+        return None
+    try:
+        board_id = yc.YOUGILE_WELCOME_BOARD_ID
+        if board_id:
+            r = requests.get(
+                f"{YOUGILE_BASE_URL}/columns", headers=hw, params={"boardId": board_id, "limit": 50}, timeout=30
+            )
+            if r.status_code != 200:
+                logger.warning("Welcome columns: HTTP %s", r.status_code)
+                return None
+            cols = r.json().get("content", []) or []
+        else:
+            rp = requests.get(f"{YOUGILE_BASE_URL}/projects", headers=hw, params={"limit": 100}, timeout=30)
+            if rp.status_code != 200:
+                return None
+            pid = None
+            for p in rp.json().get("content", []):
+                if not p.get("deleted") and p.get("title") == yc.YOUGILE_WELCOME_PROJECT:
+                    pid = p["id"]
+                    break
+            if not pid:
+                logger.warning("Welcome mirror: проект «%s» не найден", yc.YOUGILE_WELCOME_PROJECT)
+                return None
+            rb = requests.get(
+                f"{YOUGILE_BASE_URL}/boards", headers=hw, params={"projectId": pid, "limit": 100}, timeout=30
+            )
+            if rb.status_code != 200:
+                return None
+            board_id = None
+            for b in rb.json().get("content", []):
+                if not b.get("deleted") and b.get("title") == yc.YOUGILE_WELCOME_BOARD:
+                    board_id = b["id"]
+                    break
+            if not board_id:
+                logger.warning("Welcome mirror: доска «%s» не найдена", yc.YOUGILE_WELCOME_BOARD)
+                return None
+            r = requests.get(
+                f"{YOUGILE_BASE_URL}/columns", headers=hw, params={"boardId": board_id, "limit": 50}, timeout=30
+            )
+            if r.status_code != 200:
+                return None
+            cols = r.json().get("content", []) or []
+        want = yc.normalize_column_title(yc.YOUGILE_WELCOME_COLUMN)
+        for c in cols:
+            if yc.normalize_column_title(c.get("title", "")) == want:
+                _welcome_mirror_column_id = c["id"]
+                return _welcome_mirror_column_id
+        logger.warning("Welcome mirror: колонка «%s» не найдена", yc.YOUGILE_WELCOME_COLUMN)
+    except Exception as e:
+        logger.warning("Welcome mirror resolve: %s", e)
+    return None
+
+
+def mirror_task_to_welcome(task: dict) -> tuple[bool, str]:
+    """Дублирует карточку в компанию Welcome (без стикеров и исполнителей). Возвращает (успех, HTML-фрагмент для сообщения)."""
+    if not yc.YOUGILE_API_KEY_WELCOME:
+        return True, ""
+    hw = _headers_welcome()
+    col_id = resolve_welcome_mirror_column_id()
+    if not col_id:
+        return False, "\n⚠️ Дубль Welcome: проверь YOUGILE_WELCOME_* и названия проекта/доски/колонки."
+
+    body: dict = {
+        "title": task["title"][:80],
+        "columnId": col_id,
+        "description": (task.get("description") or "").strip(),
+    }
+    if task.get("deadline"):
+        try:
+            dl = datetime.strptime(task["deadline"], "%Y-%m-%d")
+            body["deadline"] = {"deadline": int(dl.timestamp() * 1000), "withTime": False}
+        except ValueError:
+            pass
+    prefix = (os.environ.get("YOUGILE_WELCOME_DESC_PREFIX") or "[Дубль] ").strip()
+    if body["description"]:
+        body["description"] = f"{prefix}\n{body['description']}"
+    else:
+        body["description"] = prefix
+
+    try:
+        resp = requests.post(f"{YOUGILE_BASE_URL}/tasks", headers=hw, json=body, timeout=30)
+    except Exception as e:
+        return False, f"\n⚠️ Дубль Welcome: {esc(str(e)[:120])}"
+    if resp.status_code in (200, 201):
+        wid = (resp.json() or {}).get("id", "")
+        if wid:
+            return True, f'\n🔗 <a href="{task_url(wid)}">Копия в Welcome</a>'
+        return True, "\n✅ Дубль Welcome создан."
+    return False, f"\n⚠️ Дубль Welcome: HTTP {resp.status_code}"
+
+
 def invalidate_project_board_cache() -> None:
     global _project_id, _board_id
     _project_id = None
@@ -1588,6 +1695,10 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
     elif task.get("checklist"):
         creation_mode = "чеклист"
 
+    mirror_ok, mirror_frag = await loop.run_in_executor(None, mirror_task_to_welcome, task)
+    if not mirror_ok:
+        mirror_frag = esc(mirror_frag) if mirror_frag else ""
+
     # Формируем итог
     priority = task.get("priority", "Medium")
     p_emoji = PRIORITY_EMOJI.get(priority, "")
@@ -1605,7 +1716,7 @@ async def handle_single_task_callback(update: Update, context: ContextTypes.DEFA
     await query.edit_message_text(
         f"Задача залетела! 🚀{key_str}\n<b>{esc(task['title'][:80])}</b>"
         f"\nПриоритет: {p_label}{dl_line}{dir_line}{sub_line}"
-        f"\n<a href=\"{task_url(tid)}\">Открыть в YouGile</a>",
+        f"\n<a href=\"{task_url(tid)}\">Открыть в YouGile</a>{mirror_frag}",
         parse_mode="HTML", disable_web_page_preview=True,
     )
     _clear_task_context(context, user_id)
@@ -1929,8 +2040,10 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
                     mode_line = "\n   ✅ Чеклист (fallback)"
             elif task.get("checklist"):
                 mode_line = "\n   ✅ Чеклист"
+            w_ok, w_frag = await loop.run_in_executor(None, mirror_task_to_welcome, task)
+            w_line = (esc(w_frag) if not w_ok else w_frag) if w_frag else ""
             results.append(
-                f"{i}. ✅ {emoji} <b>{esc(task['title'][:55])}</b>{key_str}{mode_line}\n   🔗 <a href=\"{task_url(tid)}\">Открыть</a>"
+                f"{i}. ✅ {emoji} <b>{esc(task['title'][:55])}</b>{key_str}{mode_line}\n   🔗 <a href=\"{task_url(tid)}\">Открыть</a>{w_line}"
             )
         else:
             results.append(f"{i}. ❌ {emoji} <b>{esc(task['title'][:55])}</b>\n   {esc(str(data)[:80])}")

@@ -40,6 +40,15 @@ TASK_LIST_MAX_PAGES = max(1, int(os.environ.get("YOUGILE_TASK_LIST_MAX_PAGES", "
 # Длинные ответы Telegram (HTML)
 TELEGRAM_HTML_MAX = int(os.environ.get("TELEGRAM_HTML_CHUNK", "4000"))
 
+# Вторая компания (Welcome): дублирование созданных задач
+YOUGILE_API_KEY_WELCOME = (os.environ.get("YOUGILE_API_KEY_WELCOME") or "").strip()
+# Либо UUID доски напрямую:
+YOUGILE_WELCOME_BOARD_ID = (os.environ.get("YOUGILE_WELCOME_BOARD_ID") or "").strip()
+# Либо точные названия проекта и доски (если BOARD_ID не задан):
+YOUGILE_WELCOME_PROJECT = (os.environ.get("YOUGILE_WELCOME_PROJECT") or "Маркетинг").strip()
+YOUGILE_WELCOME_BOARD = (os.environ.get("YOUGILE_WELCOME_BOARD") or "Онлайн — маркетинг").strip()
+YOUGILE_WELCOME_COLUMN = (os.environ.get("YOUGILE_WELCOME_COLUMN") or "Надо сделать").strip()
+
 
 def normalize_column_title(title: str) -> str:
     return " ".join((title or "").strip().lower().split())
