@@ -98,7 +98,7 @@ pending_report: dict[int, dict] = {}       # user_id -> параметры пе�
 llm_json_metrics = {"ok": 0, "repair": 0, "fail": 0}
 
 # Mini App URL
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://yougile-webhook.147.45.184.108.sslip.io/app")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://yougile-webhook.186.246.8.62.sslip.io/app")
 
 # --- Меню ---
 BTN_ACTIVE    = "📋 Активные задачи"

@@ -58,7 +58,7 @@ Skills: `@.claude/skills/` — `/bot-update`, `/weekly-report`, `/deploy`, `/tra
 - Dashboard: `bot/webapp/index.html` — visual task overview
 - API: `GET /api/dashboard` in `bot/event_log.py` — aggregated data
 - Static: served via FastAPI StaticFiles at `/app/`
-- URL: `https://yougile-webhook.147.45.184.108.sslip.io/app`
+- URL: `https://yougile-webhook.186.246.8.62.sslip.io/app`
 - Opens via "Дашборд" button (WebAppInfo in ReplyKeyboard)
 
 ## Key Files
