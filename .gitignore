@@ -9,3 +9,5 @@ data/document (1).json
 .claude/settings.local.json
 docker-compose.override.yml
 openai_key.txt
+yougile_key.txt
+.cursor/
